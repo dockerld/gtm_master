@@ -14,9 +14,9 @@
  *
  * Trial end date logic:
  * A) Standard: trial_start_date + 14 days
- * B) If purchase_date exists AND purchase_date is within that 14-day window AND
+ * B) If a subscription start date is within that 14-day window AND
  *    discount_percent == 100 AND discount_duration_months > 0
- *    => trial_end_date = purchase_date + discount_duration_months
+ *    => trial_end_date = subscription_start_date + discount_duration_months
  *
  * NEW:
  * - Adds/ensures a column named "status" (VALIDATION status)
@@ -128,12 +128,10 @@ function render_arr_raw_data_view() {
       )
 
       // Compute trial_end_date with your two-path logic
+      const subRows = ARR_rowsFromSubIds_(subIdsByOrgId.get(orgId), stripeBySubId)
       const trialEnd = ARR_computeTrialEndIso_({
         trialStartIso: trialStart,
-        purchaseIso: roll.purchase_date || "",
-        discount_percent: roll.discount_percent,
-        discount_duration: roll.discount_duration,
-        discount_duration_months: roll.discount_duration_months,
+        subscriptions: subRows,
         trialDays: ARR_RAW_CFG.TRIAL_DAYS
       })
 
@@ -223,26 +221,47 @@ function render_arr_raw_data_view() {
  * Trial end logic
  * ============================================================ */
 
-function ARR_computeTrialEndIso_({ trialStartIso, purchaseIso, discount_percent, discount_duration, discount_duration_months, trialDays }) {
+function ARR_computeTrialEndIso_({ trialStartIso, subscriptions, trialDays }) {
   const ts = ARR_parseIsoDate_(trialStartIso)
   if (!ts) return ""
 
   const standardEnd = new Date(ts.getTime() + Number(trialDays || 14) * 24 * 60 * 60 * 1000)
+  const candidate = ARR_pickTrialExtensionSub_(subscriptions, ts, standardEnd)
 
-  const purchase = ARR_parseIsoDate_(purchaseIso)
-  const pct = Number(discount_percent)
-  const dur = String(discount_duration || "").toLowerCase().trim()
-  const months = Number(discount_duration_months)
-
-  // Only use discount-based extension if they purchased within the initial 14-day window
-  const withinStandardWindow = purchase && purchase.getTime() <= standardEnd.getTime()
-
-  if (withinStandardWindow && pct === 100 && isFinite(months) && months > 0) {
-    const end = ARR_addMonths_(purchase, months)
+  if (candidate) {
+    const end = ARR_addMonths_(candidate.start, candidate.months)
     return end.toISOString()
   }
 
   return standardEnd.toISOString()
+}
+
+function ARR_pickTrialExtensionSub_(subscriptions, trialStart, standardEnd) {
+  const startMs = trialStart.getTime()
+  const endMs = standardEnd.getTime()
+  let best = null
+
+  ;(subscriptions || []).forEach(sub => {
+    const pct = Number(sub.discount_percent)
+    const months = Number(sub.discount_duration_months)
+    if (pct !== 100 || !isFinite(months) || months <= 0) return
+
+    const startIso = ARR_getSubscriptionStartIso_(sub)
+    const start = ARR_parseIsoDate_(startIso)
+    if (!start) return
+
+    const t = start.getTime()
+    if (t < startMs || t > endMs) return
+
+    if (!best || t < best.start.getTime()) best = { start, months }
+  })
+
+  return best
+}
+
+function ARR_getSubscriptionStartIso_(sub) {
+  if (!sub) return ""
+  return ARR_toIsoOrBlank_(sub.created_at)
 }
 
 function ARR_addMonths_(dateObj, months) {
@@ -430,6 +449,15 @@ function ARR_buildStripeBySubscriptionId_(subs) {
     out.set(id, s)
   })
   return out
+}
+
+function ARR_rowsFromSubIds_(subIdSet, stripeBySubId) {
+  const rows = []
+  ;(subIdSet || new Set()).forEach(id => {
+    const row = stripeBySubId.get(id)
+    if (row) rows.push(row)
+  })
+  return rows
 }
 
 function ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {

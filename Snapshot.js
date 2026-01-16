@@ -210,6 +210,35 @@ function buildExistingSnapshotKeySet_(sheet, snapshotDate, snapDateHeader, email
   return set
 }
 
+function buildExistingSnapshotKeySetGeneric_(sheet, snapshotDate, snapDateHeader, keyHeader, normalizeFn) {
+  const lastRow = sheet.getLastRow()
+  const lastCol = sheet.getLastColumn()
+  const set = new Set()
+  if (lastRow < 2) return set
+
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim())
+  const snapIdx = header.findIndex(h => h.toLowerCase() === snapDateHeader.toLowerCase())
+  const keyIdx = header.findIndex(h => h.toLowerCase() === keyHeader.toLowerCase())
+
+  if (snapIdx < 0) throw new Error(`Snapshot sheet missing header: ${snapDateHeader}`)
+  if (keyIdx < 0) throw new Error(`Snapshot sheet missing header: ${keyHeader}`)
+
+  const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues()
+  const norm = typeof normalizeFn === 'function' ? normalizeFn : (v => String(v || '').trim())
+
+  for (const r of data) {
+    const d = String(r[snapIdx] || '').trim()
+    if (d !== snapshotDate) continue
+
+    const key = norm(r[keyIdx])
+    if (!key) continue
+
+    set.add(snapshotDate + '|' + key)
+  }
+
+  return set
+}
+
 /* =========================
  * Shared util compatibility wrappers
  * ========================= */
