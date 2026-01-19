@@ -45,6 +45,7 @@ const ARR_RAW_CFG = {
 
   // Adds a validation status column if missing
   VALIDATION_STATUS_HEADER: "status",
+  SUBSCRIPTION_START_HEADER: "subscription_start_date",
 }
 
 function render_arr_raw_data_view() {
@@ -65,7 +66,11 @@ function render_arr_raw_data_view() {
     if (!shStripe) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.STRIPE_SUBS}`)
 
     // Ensure headers exist; also ensure "status" column exists
-    const header = ARR_ensureHeaderRow_(shOut, ARR_RAW_CFG.HEADER_ROW, ARR_RAW_CFG.VALIDATION_STATUS_HEADER)
+    const header = ARR_ensureHeaderRow_(
+      shOut,
+      ARR_RAW_CFG.HEADER_ROW,
+      [ARR_RAW_CFG.VALIDATION_STATUS_HEADER, ARR_RAW_CFG.SUBSCRIPTION_START_HEADER]
+    )
     const headerMap = ARR_headerMapFromRow_(header)
 
     // Read inputs
@@ -135,6 +140,10 @@ function render_arr_raw_data_view() {
         trialDays: ARR_RAW_CFG.TRIAL_DAYS
       })
 
+      const subscriptionStart = ARR_minIso_(
+        subRows.map(r => ARR_toIsoOrBlank_(r.created_at)).filter(Boolean)
+      )
+
       // Cohorts
       const trialCohortMonth = ARR_isoToCohortMonth_(orgCreationIso)
       const paidCohortMonth = ARR_isoToCohortMonth_(roll.purchase_date || "")
@@ -172,6 +181,7 @@ function render_arr_raw_data_view() {
 
         trial_start_date: trialStart,
         trial_end_date: trialEnd,
+        subscription_start_date: subscriptionStart,
 
         purchase_date: roll.purchase_date || "",
         churn_date: churnDate,
@@ -519,14 +529,19 @@ function ARR_ensureHeaderRow_(sheet, headerRow, ensureHeaderName) {
     throw new Error(`arr_raw_data header row ${headerRow} is empty. Add your headers to row ${headerRow} first.`)
   }
 
-  // Ensure "status" column exists
-  if (ensureHeaderName && !header.includes(ensureHeaderName)) {
-    header = header.concat([ensureHeaderName])
-    sheet.getRange(headerRow, 1, 1, header.length).setValues([header])
-  } else {
-    // Keep header width stable
-    sheet.getRange(headerRow, 1, 1, header.length).setValues([header])
+  const ensureList = Array.isArray(ensureHeaderName)
+    ? ensureHeaderName
+    : (ensureHeaderName ? [ensureHeaderName] : [])
+
+  if (ensureList.length) {
+    ensureList.forEach(name => {
+      if (!name) return
+      if (!header.includes(name)) header.push(name)
+    })
   }
+
+  // Keep header width stable
+  sheet.getRange(headerRow, 1, 1, header.length).setValues([header])
 
   return header
 }

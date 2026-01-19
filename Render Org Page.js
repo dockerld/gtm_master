@@ -3,6 +3,8 @@
  *
  * Updates "org_info" with:
  * - Org ID, Org Name, Org Owner, Service (manual)
+ * - Trial Start Date + Trial End Date (same org-based logic as arr_raw_data)
+ * - Subscription Start Date + Purchase Date (from Stripe)
  * - In clerk (member count from raw_clerk_memberships)
  * - Seats (paid seats from Stripe quantity_total via stripe_subscription_id)
  * - Diff (In clerk - Seats)
@@ -31,6 +33,9 @@ const ORG_INFO_CFG = {
   HEADER_ROW: 1,
   DATA_START_ROW: 2,
 
+  // Trial standard length (same as arr_raw_data)
+  TRIAL_DAYS: 14,
+
   // ✅ UpSale moved to the END and will be preserved
   HEADERS: [
     'Org ID',
@@ -40,6 +45,10 @@ const ORG_INFO_CFG = {
     'In clerk',
     'Seats',
     'Diff',
+    'subscription_start_date',
+    'purchase_date',
+    'trial_start_date',
+    'trial_end_date',
     'UpSale'
   ],
 
@@ -65,6 +74,8 @@ function render_org_info_view() {
 
       const orgs = ORGINFO_readSheetObjects_(shOrgs, 1)
       const mems = ORGINFO_readSheetObjects_(shMems, 1)
+      const users = ORGINFO_readSheetObjects_(shClerkUsers, 1)
+      const subs = ORGINFO_readSheetObjects_(shStripeSubs, 1)
 
       // Preserve manual "Service" + "UpSale" from existing org_info by Org ID
       const existingManualByOrgId = ORGINFO_readExistingManualByOrgId_(sh)
@@ -72,9 +83,15 @@ function render_org_info_view() {
       // Build org_id -> {members:Set(emailKey), owners:[], admins:[], any:[]}
       const memAgg = ORGINFO_buildMembershipAgg_(mems)
 
+      // Trial logic indexes (org-based, same as arr_raw_data)
+      const membershipsByOrgId = ORGINFO_buildMembershipsByOrgId_(mems) // orgId -> [{email,email_key,role,created_at}]
+      const userByEmailKey = ORGINFO_buildUsersByEmailKey_(users)       // email_key -> user obj
+      const subIdsByOrgId = ORGINFO_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey)
+      const stripeBySubId = ORGINFO_buildStripeBySubscriptionId_(subs)
+
       // Seats from Stripe: build indexes
-      const subIdByEmailKey = ORGINFO_buildSubIdByEmailKey_(shClerkUsers)                 // email_key -> stripe_subscription_id
-      const qtyBySubId = ORGINFO_buildQuantityBySubId_(shStripeSubs)                      // stripe_subscription_id -> quantity_total
+      const subIdByEmailKey = ORGINFO_buildSubIdByEmailKey_(users)                 // email_key -> stripe_subscription_id
+      const qtyBySubId = ORGINFO_buildQuantityBySubId_(subs)                      // stripe_subscription_id -> quantity_total
       const seatsByOrgId = ORGINFO_buildSeatsByOrgId_(memAgg, subIdByEmailKey, qtyBySubId) // org_id -> seats
 
       const out = []
@@ -109,7 +126,45 @@ function render_org_info_view() {
         const seats = ORGINFO_safeInt_(seatsByOrgId.get(orgId) || 0)
         const diff = (Number(inClerk) || 0) - (Number(seats) || 0)
 
-        out.push([orgId, orgName, ownerEmail, service, inClerk, seats, diff, upsale])
+        const trialOwnerEmail = ORGINFO_pickOrgOwnerEmail_(membershipsByOrgId.get(orgId) || []) || ownerEmail
+        const ownerKey = ORGINFO_normEmail_(trialOwnerEmail)
+        const ownerUser = ownerKey ? (userByEmailKey.get(ownerKey) || null) : null
+        const trialStart = ORGINFO_toIsoOrBlank_(
+          ORGINFO_firstNonEmpty_(
+            ownerUser && ownerUser.trial_start_date,
+            ownerUser && ownerUser.trialstartdate,
+            ownerUser && ownerUser.trial_start,
+            ownerUser && ownerUser.trial_start_at
+          )
+        )
+        const subRows = ORGINFO_rowsFromSubIds_(subIdsByOrgId.get(orgId), stripeBySubId)
+        const trialEnd = ORGINFO_computeTrialEndIso_({
+          trialStartIso: trialStart,
+          subscriptions: subRows,
+          trialDays: ORG_INFO_CFG.TRIAL_DAYS
+        })
+
+        const subscriptionStart = ORGINFO_minIso_(
+          subRows.map(r => ORGINFO_toIsoOrBlank_(r.created_at)).filter(Boolean)
+        )
+        const purchaseDate = ORGINFO_minIso_(
+          subRows.map(r => ORGINFO_toIsoOrBlank_(r.first_payment_at)).filter(Boolean)
+        )
+
+        out.push([
+          orgId,
+          orgName,
+          ownerEmail,
+          service,
+          inClerk,
+          seats,
+          diff,
+          ORGINFO_isoToDateOrBlank_(subscriptionStart),
+          ORGINFO_isoToDateOrBlank_(purchaseDate),
+          ORGINFO_isoToDateOrBlank_(trialStart),
+          ORGINFO_isoToDateOrBlank_(trialEnd),
+          upsale
+        ])
       }
 
       // Rebuild sheet
@@ -198,9 +253,21 @@ function ORGINFO_readExistingManualByOrgId_(sheet) {
  * Seats from Stripe (indexes)
  * ========================= */
 
-function ORGINFO_buildSubIdByEmailKey_(sheet) {
+function ORGINFO_buildSubIdByEmailKey_(source) {
   const out = new Map()
 
+  if (Array.isArray(source)) {
+    ;(source || []).forEach(u => {
+      const emailKeyRaw = String(u.email_key || u.email || '').trim()
+      const emailKey = normalizeEmailCompat_(emailKeyRaw)
+      const subId = String(u.stripe_subscription_id || '').trim()
+      if (!emailKey || !subId) return
+      out.set(emailKey, subId)
+    })
+    return out
+  }
+
+  const sheet = source
   const lastRow = sheet.getLastRow()
   const lastCol = sheet.getLastColumn()
   if (lastRow < 2) return out
@@ -224,9 +291,20 @@ function ORGINFO_buildSubIdByEmailKey_(sheet) {
   return out
 }
 
-function ORGINFO_buildQuantityBySubId_(sheet) {
+function ORGINFO_buildQuantityBySubId_(source) {
   const out = new Map()
 
+  if (Array.isArray(source)) {
+    ;(source || []).forEach(r => {
+      const subId = String(r.stripe_subscription_id || r.subscription_id || r.id || '').trim()
+      if (!subId) return
+      const qty = ORGINFO_safeInt_(r.quantity_total)
+      out.set(subId, qty)
+    })
+    return out
+  }
+
+  const sheet = source
   const lastRow = sheet.getLastRow()
   const lastCol = sheet.getLastColumn()
   if (lastRow < 2) return out
@@ -312,6 +390,149 @@ function ORGINFO_buildMembershipAgg_(mems) {
 }
 
 /* =========================
+ * Trial dates (org-based)
+ * ========================= */
+
+function ORGINFO_buildMembershipsByOrgId_(mems) {
+  const out = new Map()
+  ;(mems || []).forEach(m => {
+    const orgId = ORGINFO_str_(m.org_id)
+    if (!orgId) return
+    const email = ORGINFO_str_(m.email) || ORGINFO_str_(m.email_key)
+    const emailKey = ORGINFO_normEmail_(m.email_key || email)
+    const role = ORGINFO_str_(m.role).toLowerCase()
+    const createdAt = ORGINFO_toIsoOrBlank_(m.created_at)
+
+    if (!out.has(orgId)) out.set(orgId, [])
+    out.get(orgId).push({ email, email_key: emailKey, role, created_at: createdAt })
+  })
+  return out
+}
+
+function ORGINFO_pickOrgOwnerEmail_(members) {
+  const arr = (members || []).slice()
+
+  // Sort by created_at ascending (earliest)
+  arr.sort((a, b) => {
+    const ams = ORGINFO_toMs_(a.created_at) || 0
+    const bms = ORGINFO_toMs_(b.created_at) || 0
+    return ams - bms
+  })
+
+  const owners = arr.filter(m => (m.role || '').includes('owner'))
+  if (owners.length) return owners[0].email || owners[0].email_key || ''
+
+  const admins = arr.filter(m => (m.role || '').includes('admin'))
+  if (admins.length) return admins[0].email || admins[0].email_key || ''
+
+  if (arr.length) return arr[0].email || arr[0].email_key || ''
+  return ''
+}
+
+function ORGINFO_buildUsersByEmailKey_(users) {
+  const out = new Map()
+  ;(users || []).forEach(u => {
+    const email = ORGINFO_str_(u.email)
+    const emailKeyRaw = ORGINFO_str_(u.email_key || email)
+    const emailKey = ORGINFO_normEmail_(emailKeyRaw)
+    if (!emailKey) return
+    out.set(emailKey, u)
+  })
+  return out
+}
+
+function ORGINFO_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {
+  const out = new Map()
+
+  ;(membershipsByOrgId || new Map()).forEach((members, orgId) => {
+    const set = new Set()
+    ;(members || []).forEach(m => {
+      const key = ORGINFO_normEmail_(m.email_key || m.email)
+      if (!key) return
+      const u = userByEmailKey.get(key)
+      const subId = ORGINFO_str_(u && u.stripe_subscription_id)
+      if (subId) set.add(subId)
+    })
+    out.set(orgId, set)
+  })
+
+  return out
+}
+
+function ORGINFO_buildStripeBySubscriptionId_(subs) {
+  const out = new Map()
+  ;(subs || []).forEach(s => {
+    const id = ORGINFO_str_(s.stripe_subscription_id || s.subscription_id || s.id)
+    if (!id) return
+    out.set(id, s)
+  })
+  return out
+}
+
+function ORGINFO_rowsFromSubIds_(subIdSet, stripeBySubId) {
+  const rows = []
+  ;(subIdSet || new Set()).forEach(id => {
+    const row = stripeBySubId.get(id)
+    if (row) rows.push(row)
+  })
+  return rows
+}
+
+function ORGINFO_computeTrialEndIso_({ trialStartIso, subscriptions, trialDays }) {
+  const ts = ORGINFO_parseIsoDate_(trialStartIso)
+  if (!ts) return ''
+
+  const standardEnd = new Date(ts.getTime() + Number(trialDays || 14) * 24 * 60 * 60 * 1000)
+  const candidate = ORGINFO_pickTrialExtensionSub_(subscriptions, ts, standardEnd)
+
+  if (candidate) {
+    const end = ORGINFO_addMonths_(candidate.start, candidate.months)
+    return end.toISOString()
+  }
+
+  return standardEnd.toISOString()
+}
+
+function ORGINFO_pickTrialExtensionSub_(subscriptions, trialStart, standardEnd) {
+  const startMs = trialStart.getTime()
+  const endMs = standardEnd.getTime()
+  let best = null
+
+  ;(subscriptions || []).forEach(sub => {
+    const pct = Number(sub.discount_percent)
+    const months = Number(sub.discount_duration_months)
+    if (pct !== 100 || !isFinite(months) || months <= 0) return
+
+    const startIso = ORGINFO_getSubscriptionStartIso_(sub)
+    const start = ORGINFO_parseIsoDate_(startIso)
+    if (!start) return
+
+    const t = start.getTime()
+    if (t < startMs || t > endMs) return
+
+    if (!best || t < best.start.getTime()) best = { start, months }
+  })
+
+  return best
+}
+
+function ORGINFO_getSubscriptionStartIso_(sub) {
+  if (!sub) return ''
+  return ORGINFO_toIsoOrBlank_(sub.created_at)
+}
+
+function ORGINFO_addMonths_(dateObj, months) {
+  const d = new Date(dateObj.getTime())
+  const m = Number(months) || 0
+  const day = d.getUTCDate()
+  d.setUTCMonth(d.getUTCMonth() + m)
+
+  // Best-effort clamp for month length differences:
+  if (d.getUTCDate() !== day) d.setUTCDate(0)
+  return d
+}
+
+/* =========================
  * Sheet IO
  * ========================= */
 
@@ -361,10 +582,18 @@ function ORGINFO_applyFormats_(sheet, numDataRows) {
   const colInClerk = ORG_INFO_CFG.HEADERS.indexOf('In clerk') + 1
   const colSeats = ORG_INFO_CFG.HEADERS.indexOf('Seats') + 1
   const colDiff = ORG_INFO_CFG.HEADERS.indexOf('Diff') + 1
+  const colSubStart = ORG_INFO_CFG.HEADERS.indexOf('subscription_start_date') + 1
+  const colPurchase = ORG_INFO_CFG.HEADERS.indexOf('purchase_date') + 1
+  const colTrialStart = ORG_INFO_CFG.HEADERS.indexOf('trial_start_date') + 1
+  const colTrialEnd = ORG_INFO_CFG.HEADERS.indexOf('trial_end_date') + 1
 
   if (colInClerk > 0) sheet.getRange(2, colInClerk, numDataRows, 1).setNumberFormat('0').setHorizontalAlignment('center')
   if (colSeats > 0) sheet.getRange(2, colSeats, numDataRows, 1).setNumberFormat('0').setHorizontalAlignment('center')
   if (colDiff > 0) sheet.getRange(2, colDiff, numDataRows, 1).setNumberFormat('0').setHorizontalAlignment('center')
+  if (colSubStart > 0) sheet.getRange(2, colSubStart, numDataRows, 1).setNumberFormat('MM-dd-yy')
+  if (colPurchase > 0) sheet.getRange(2, colPurchase, numDataRows, 1).setNumberFormat('MM-dd-yy')
+  if (colTrialStart > 0) sheet.getRange(2, colTrialStart, numDataRows, 1).setNumberFormat('MM-dd-yy')
+  if (colTrialEnd > 0) sheet.getRange(2, colTrialEnd, numDataRows, 1).setNumberFormat('MM-dd-yy')
 }
 
 function ORGINFO_applyServiceDropdown_(sheet) {
@@ -456,6 +685,74 @@ function ORGINFO_applyDiffConditionalFormatting_(sheet) {
 /* =========================
  * Tiny utils
  * ========================= */
+
+function ORGINFO_str_(v) {
+  if (v === null || v === undefined) return ''
+  return String(v).trim()
+}
+
+function ORGINFO_normEmail_(v) {
+  const s = String(v || '').trim().toLowerCase()
+  if (!s) return ''
+  return s.replace(/\+[^@]+(?=@)/, '')
+}
+
+function ORGINFO_toIsoOrBlank_(v) {
+  if (!v) return ''
+  if (v instanceof Date) return v.toISOString()
+
+  const s = String(v || '').trim()
+  if (!s) return ''
+
+  // ISO string already
+  if (s.includes('T') && s.endsWith('Z')) return s
+
+  // unix seconds/millis
+  if (/^\d+$/.test(s)) {
+    const n = Number(s)
+    const ms = n > 1e12 ? n : n * 1000
+    const d = new Date(ms)
+    return isNaN(d.getTime()) ? '' : d.toISOString()
+  }
+
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? '' : d.toISOString()
+}
+
+function ORGINFO_parseIsoDate_(iso) {
+  const s = String(iso || '').trim()
+  if (!s) return null
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? null : d
+}
+
+function ORGINFO_isoToDateOrBlank_(iso) {
+  const d = ORGINFO_parseIsoDate_(iso)
+  return d ? d : ''
+}
+
+function ORGINFO_toMs_(iso) {
+  const d = ORGINFO_parseIsoDate_(iso)
+  return d ? d.getTime() : 0
+}
+
+function ORGINFO_firstNonEmpty_() {
+  for (let i = 0; i < arguments.length; i++) {
+    const v = ORGINFO_str_(arguments[i])
+    if (v) return v
+  }
+  return ''
+}
+
+function ORGINFO_minIso_(isos) {
+  let best = null
+  ;(isos || []).forEach(s => {
+    const d = ORGINFO_parseIsoDate_(s)
+    if (!d) return
+    if (!best || d.getTime() < best.getTime()) best = d
+  })
+  return best ? best.toISOString() : ''
+}
 
 function ORGINFO_safeInt_(v) {
   const n = Number(v)

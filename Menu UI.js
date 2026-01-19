@@ -25,6 +25,11 @@
  *   render_org_info_view()
  *   render_sauron_view()
  *   render_ring_view()
+ *   render_arr_raw_data_view()
+ *   write_arr_snapshot()
+ *   render_arr_waterfall_facts()
+ *   render_onboarding_stats()
+ *   render_org_conversion_stats()
  *   notion_push_upsale_targets_from_org_info()   ✅ NEW
  *   write_daily_snapshot()
  *   writeSyncLog(step, status, rows_in, rows_out, seconds, error)
@@ -41,6 +46,10 @@ function onOpen() {
     .addItem('Run only Clerk', 'ui_run_only_clerk')
     .addSeparator()
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
+    .addSeparator()
+    .addItem('Run ARR refresh', 'ui_run_arr_refresh')
+    .addItem('Run Onboarding stats', 'ui_run_onboarding_stats')
+    .addItem('Run Conversion stats', 'ui_run_conversion_stats')
     .addSeparator()
     .addItem('Push UpSale targets to Notion', 'ui_push_upsale_targets_to_notion') // ✅ NEW
     .addToUi()
@@ -106,6 +115,32 @@ function ui_rebuild_canon_tables() {
   })
 }
 
+function ui_run_arr_refresh() {
+  return uiRunWrapped_('ui_run_arr_refresh', () => {
+    runSteps_([
+      { name: 'render_arr_raw_data_view', fn: render_arr_raw_data_view },
+      { name: 'write_arr_snapshot', fn: write_arr_snapshot },
+      { name: 'render_arr_waterfall_facts', fn: render_arr_waterfall_facts }
+    ])
+  })
+}
+
+function ui_run_onboarding_stats() {
+  return uiRunWrapped_('ui_run_onboarding_stats', () => {
+    runSteps_([
+      { name: 'render_onboarding_stats', fn: render_onboarding_stats }
+    ])
+  })
+}
+
+function ui_run_conversion_stats() {
+  return uiRunWrapped_('ui_run_conversion_stats', () => {
+    runSteps_([
+      { name: 'render_org_conversion_stats', fn: render_org_conversion_stats }
+    ])
+  })
+}
+
 /**
  * ✅ NEW: Manual button to push UpSale targets from org_info -> Notion
  */
@@ -122,7 +157,7 @@ function ui_push_upsale_targets_to_notion() {
  * ========================= */
 
 function uiRunWrapped_(name, fn) {
-  return lockWrap(() => {
+  return lockWrap(name, () => {
     const ss = SpreadsheetApp.getActive()
     ss.toast('Running…', 'Ping Ops', 5)
 

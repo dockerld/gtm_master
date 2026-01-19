@@ -11,6 +11,7 @@
  * 5) build_canon_users
  * 6) render_sauron_view
  * 7) writeSyncLog summary
+ * 8) ARR + analytics sheets (no backfill)
  *
  * Notes:
  * - Each step is wrapped so one failure does not stop later steps
@@ -39,8 +40,15 @@ function run_daily_pipeline() {
       { name: 'build_canon_users',               fn: build_canon_users },
       { name: 'render_org_info_view',            fn: render_org_info_view },
 
+      { name: 'render_arr_raw_data_view',        fn: render_arr_raw_data_view },
+      { name: 'write_arr_snapshot',              fn: write_arr_snapshot },
+      { name: 'render_arr_waterfall_facts',      fn: render_arr_waterfall_facts },
+
       { name: 'render_sauron_view',              fn: render_sauron_view },
-      { name: 'render_ring_view', fn: render_ring_view }
+      { name: 'render_ring_view',                fn: render_ring_view },
+
+      { name: 'render_onboarding_stats',         fn: render_onboarding_stats },
+      { name: 'render_org_conversion_stats',     fn: render_org_conversion_stats }
     ]
 
     for (const step of steps) {
