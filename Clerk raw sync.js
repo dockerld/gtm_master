@@ -292,8 +292,17 @@ function clerk_pull_orgs_to_raw() {
   const memberships = clerkGetAllMembershipsCached_(apiKey)
   const orgOwnerByOrgId = clerkBuildOrgOwnerIndex_(memberships) // org_id -> user_id
 
-  // 4) Write rows
-  const rows = orgs.map(o => {
+  const canFilterEmpty = membersCountByOrgId.size > 0
+
+  // 4) Write rows (optionally skip empty orgs if membership counts are available)
+  const rows = orgs
+    .filter(o => {
+      if (!canFilterEmpty) return true
+      const orgId = strOrBlank_(o.id)
+      const membersCount = membersCountByOrgId.get(orgId) ?? 0
+      return Number(membersCount) > 0
+    })
+    .map(o => {
     const orgId = strOrBlank_(o.id)
     const membersCount = membersCountByOrgId.get(orgId) ?? 0
     const ownerUserId = orgOwnerByOrgId.get(orgId) || ''
@@ -307,7 +316,7 @@ function clerk_pull_orgs_to_raw() {
       Number(membersCount) || 0,
       ownerUserId
     ]
-  })
+    })
 
   clerkOverwriteSheet_(shOrgs, headers, rows)
 
@@ -318,7 +327,9 @@ function clerk_pull_orgs_to_raw() {
     orgs.length,
     rows.length,
     seconds,
-    'members_count computed from raw_clerk_memberships; org_owner_user_id computed from memberships'
+    canFilterEmpty
+      ? 'members_count computed from raw_clerk_memberships; removed orgs with 0 members'
+      : 'members_count computed from raw_clerk_memberships (empty); no filtering applied'
   )
   return { rows_in: orgs.length, rows_out: rows.length }
 }

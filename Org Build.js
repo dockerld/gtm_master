@@ -127,8 +127,6 @@ function build_canon_orgs() {
         let subStatus = ''
         let tier = ''
         let plan = ''
-        let trialStart = ''
-        let trialEnds = ''
 
         if (userRows.has('stripe_subscription_id')) {
           stripeSubId = String(r[userRows.col('stripe_subscription_id')] || '').trim()
@@ -145,13 +143,6 @@ function build_canon_orgs() {
         if (userRows.has('current_plan')) {
           plan = String(r[userRows.col('current_plan')] || '').trim()
         }
-        if (userRows.has('trial_start_date')) {
-          trialStart = String(r[userRows.col('trial_start_date')] || '').trim()
-        }
-        if (userRows.has('trial_ends_at')) {
-          trialEnds = String(r[userRows.col('trial_ends_at')] || '').trim()
-        }
-
         // Fallback: parse from a metadata JSON column if present
         // Common names you might have: private_metadata, public_metadata, unsafe_metadata, metadata
         if (!stripeSubId || !stripeCustomerId) {
@@ -169,8 +160,6 @@ function build_canon_orgs() {
               subStatus = subStatus || String(meta.subscriptionStatus || meta.subscription_status || '').trim()
               tier = tier || String(meta.subscriptionTier || meta.subscription_tier || '').trim()
               plan = plan || String(meta.currentPlan || meta.current_plan || '').trim()
-              trialStart = trialStart || String(meta.trialStartDate || meta.trial_start_date || '').trim()
-              trialEnds = trialEnds || String(meta.trialEndsAt || meta.trial_ends_at || '').trim()
             }
           }
         }
@@ -182,9 +171,7 @@ function build_canon_orgs() {
           stripe_customer_id: stripeCustomerId,
           subscription_status: subStatus,
           subscription_tier: tier,
-          current_plan: plan,
-          trial_start_date: trialStart,
-          trial_ends_at: trialEnds
+          current_plan: plan
         })
       })
 

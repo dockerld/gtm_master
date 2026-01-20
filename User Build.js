@@ -65,6 +65,7 @@ function build_canon_users() {
           'days_since_last_login',
 
           'meetings_recorded',
+          'hours_recorded',
           'ask_meeting',
           'ask_global',
           'client_page_views',
@@ -365,6 +366,7 @@ function build_canon_users() {
       function emptyMetrics_() {
         return {
           meetings_recorded: 0,
+          hours_recorded: 0,
           ask_meeting: 0,
           ask_global: 0,
           client_page_views: 0,
@@ -400,6 +402,7 @@ function build_canon_users() {
 
           out.set(key, {
             meetings_recorded: num_(metricsTbl, r, 'meetings_recorded'),
+            hours_recorded: num_(metricsTbl, r, 'hours_recorded'),
             ask_meeting: num_(metricsTbl, r, 'ask_meeting'),
             ask_global: num_(metricsTbl, r, 'ask_global'),
             client_page_views: num_(metricsTbl, r, 'client_page_views'),
@@ -640,6 +643,7 @@ function build_canon_users() {
           daysSinceLastLogin,        // ✅ write computed difference
 
           m.meetings_recorded,
+          m.hours_recorded,
           m.ask_meeting,
           m.ask_global,
           m.client_page_views,

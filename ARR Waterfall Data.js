@@ -38,6 +38,7 @@ const ARR_RAW_CFG = {
     CLERK_MEMBERSHIPS: "raw_clerk_memberships",
     CLERK_USERS: "raw_clerk_users",
     STRIPE_SUBS: "raw_stripe_subscriptions",
+    ORG_INFO: "org_info",
   },
 
   // Trial standard length
@@ -59,11 +60,13 @@ function render_arr_raw_data_view() {
     const shMems = ss.getSheetByName(ARR_RAW_CFG.INPUTS.CLERK_MEMBERSHIPS)
     const shUsers = ss.getSheetByName(ARR_RAW_CFG.INPUTS.CLERK_USERS)
     const shStripe = ss.getSheetByName(ARR_RAW_CFG.INPUTS.STRIPE_SUBS)
+    const shOrgInfo = ss.getSheetByName(ARR_RAW_CFG.INPUTS.ORG_INFO)
 
     if (!shOrgs) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.CLERK_ORGS}`)
     if (!shMems) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.CLERK_MEMBERSHIPS}`)
     if (!shUsers) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.CLERK_USERS}`)
     if (!shStripe) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.STRIPE_SUBS}`)
+    if (!shOrgInfo) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.ORG_INFO}`)
 
     // Ensure headers exist; also ensure "status" column exists
     const header = ARR_ensureHeaderRow_(
@@ -78,11 +81,13 @@ function render_arr_raw_data_view() {
     const mems = ARR_readSheetObjects_(shMems, 1)
     const users = ARR_readSheetObjects_(shUsers, 1)
     const subs = ARR_readSheetObjects_(shStripe, 1)
+    const orgInfo = ARR_readSheetObjects_(shOrgInfo, 1)
 
     // Build indexes
     const membershipsByOrgId = ARR_buildMembershipsByOrgId_(mems) // orgId -> [{email,email_key,role,created_at}]
     const stripeBySubId = ARR_buildStripeBySubscriptionId_(subs)  // subId -> stripe row obj
     const userByEmailKey = ARR_buildUsersByEmailKey_(users)       // email_key -> user obj (incl stripe_subscription_id)
+    const orgInfoById = ARR_buildOrgInfoById_(orgInfo)
 
     // orgId -> Set(subIds) from memberships -> users -> stripe_subscription_id
     const subIdsByOrgId = ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey)
@@ -118,35 +123,15 @@ function render_arr_raw_data_view() {
       // Stripe email (customer email)
       const stripeEmail = roll.stripe_email || ""
 
-      // trial start/end from Clerk private metadata in raw_clerk_users (org owner is best guess for org trial metadata)
-      // If you later store org trial meta on orgs instead, swap the source.
-      const ownerKey = ARR_normEmail_(ownerEmail)
-      const ownerUser = ownerKey ? (userByEmailKey.get(ownerKey) || null) : null
-
-      const trialStart = ARR_toIsoOrBlank_(
-        ARR_firstNonEmpty_(
-          ownerUser && ownerUser.trial_start_date,
-          ownerUser && ownerUser.trialStartDate,
-          ownerUser && ownerUser.trial_start,
-          ownerUser && ownerUser.trial_start_at
-        )
-      )
-
-      // Compute trial_end_date with your two-path logic
-      const subRows = ARR_rowsFromSubIds_(subIdsByOrgId.get(orgId), stripeBySubId)
-      const trialEnd = ARR_computeTrialEndIso_({
-        trialStartIso: trialStart,
-        subscriptions: subRows,
-        trialDays: ARR_RAW_CFG.TRIAL_DAYS
-      })
-
-      const subscriptionStart = ARR_minIso_(
-        subRows.map(r => ARR_toIsoOrBlank_(r.created_at)).filter(Boolean)
-      )
+      const info = orgInfoById.get(orgId) || {}
+      const trialStart = ARR_toIsoOrBlank_(info.trial_start_date)
+      const trialEnd = ARR_toIsoOrBlank_(info.trial_end_date)
+      const subscriptionStart = ARR_toIsoOrBlank_(info.subscription_start_date)
+      const infoPurchaseDate = ARR_toIsoOrBlank_(info.purchase_date)
 
       // Cohorts
-      const trialCohortMonth = ARR_isoToCohortMonth_(orgCreationIso)
-      const paidCohortMonth = ARR_isoToCohortMonth_(roll.purchase_date || "")
+      const trialCohortMonth = ARR_isoToCohortMonthDate_(trialStart)
+      const paidCohortMonth = ARR_isoToCohortMonth_(infoPurchaseDate || roll.purchase_date || "")
 
       // Current status (lifecycle; keep your existing column name "current_status")
       const currentStatus = roll.current_status || (roll.has_active ? "active" : (roll.has_any ? "inactive" : ""))
@@ -156,7 +141,7 @@ function render_arr_raw_data_view() {
       const billingFrequency = roll.billing_frequency || ""
 
       // ARR
-      const totalArr = roll.total_arr || 0
+      const totalArr = ARR_num_(roll.total_arr)
       const meetingAssArr = totalArr // your “same numbers” rule
 
       // Churn
@@ -183,7 +168,7 @@ function render_arr_raw_data_view() {
         trial_end_date: trialEnd,
         subscription_start_date: subscriptionStart,
 
-        purchase_date: roll.purchase_date || "",
+        purchase_date: infoPurchaseDate || roll.purchase_date || "",
         churn_date: churnDate,
 
         trial_cohort_month: trialCohortMonth,
@@ -212,6 +197,8 @@ function render_arr_raw_data_view() {
     if (outRows.length) {
       ARR_batchSetValues_(shOut, ARR_RAW_CFG.DATA_START_ROW, 1, outRows, 2000)
     }
+
+    ARR_applyArrRawFormats_(shOut, header, outRows.length)
 
     shOut.setFrozenRows(ARR_RAW_CFG.HEADER_ROW)
     shOut.autoResizeColumns(1, header.length)
@@ -451,6 +438,16 @@ function ARR_buildUsersByEmailKey_(users) {
   return out
 }
 
+function ARR_buildOrgInfoById_(rows) {
+  const out = new Map()
+  ;(rows || []).forEach(r => {
+    const orgId = ARR_str_(r.org_id)
+    if (!orgId) return
+    out.set(orgId, r)
+  })
+  return out
+}
+
 function ARR_buildStripeBySubscriptionId_(subs) {
   const out = new Map()
   ;(subs || []).forEach(s => {
@@ -579,6 +576,22 @@ function ARR_clearDataRegion_(sheet, startRow, numCols) {
   sheet.getRange(startRow, 1, numRows, numCols).clearContent()
 }
 
+function ARR_applyArrRawFormats_(sheet, header, numRows) {
+  if (!numRows) return
+  const trialIdx = header.findIndex(h => String(h || "").trim().toLowerCase() === "trial_cohort_month")
+  if (trialIdx >= 0) {
+    const col = trialIdx + 1
+    sheet.getRange(ARR_RAW_CFG.DATA_START_ROW, col, numRows, 1).setNumberFormat("MMM yyyy")
+  }
+
+  const numHeaders = ["total_arr", "meeting_ass_arr", "product_2_arr", "product_3_arr"]
+  numHeaders.forEach(h => {
+    const idx = header.findIndex(k => String(k || "").trim().toLowerCase() === h)
+    if (idx < 0) return
+    sheet.getRange(ARR_RAW_CFG.DATA_START_ROW, idx + 1, numRows, 1).setNumberFormat("0")
+  })
+}
+
 function ARR_batchSetValues_(sheet, startRow, startCol, values, chunkSize) {
   const size = chunkSize || 2000
   for (let i = 0; i < values.length; i += size) {
@@ -635,6 +648,11 @@ function ARR_normEmail_(v) {
   return s.replace(/\+[^@]+(?=@)/, "")
 }
 
+function ARR_num_(v) {
+  const n = Number(v)
+  return isFinite(n) ? n : 0
+}
+
 function ARR_toIsoOrBlank_(v) {
   if (!v) return ""
   if (v instanceof Date) return v.toISOString()
@@ -675,6 +693,12 @@ function ARR_isoToCohortMonth_(iso) {
   const y = d.getUTCFullYear()
   const m = String(d.getUTCMonth() + 1).padStart(2, "0")
   return `${y}-${m}`
+}
+
+function ARR_isoToCohortMonthDate_(iso) {
+  const d = ARR_parseIsoDate_(iso)
+  if (!d) return ""
+  return new Date(d.getFullYear(), d.getMonth(), 1)
 }
 
 function ARR_minIso_(isos) {

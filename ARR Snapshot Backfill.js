@@ -3,7 +3,7 @@
  *
  * One-time backfill of arr_snapshot for the last 6 months.
  * Uses current arr_raw_data values and includes rows where
- * org_creation_date <= snapshot_date (date-only compare).
+ * Includes rows where org_creation_date < snapshot_date (date-only, UTC).
  **************************************************************/
 
 const ARR_BACKFILL_CFG = {
@@ -38,9 +38,7 @@ function write_arr_snapshot_backfill_last_6_months() {
     if (!src) throw new Error(`Source sheet not found: ${ARR_BACKFILL_CFG.SOURCE_SHEET}`)
 
     const snap = getOrCreateSheetCompat_(ss, ARR_BACKFILL_CFG.SNAP_SHEET)
-    const tz = Session.getScriptTimeZone()
-
-    const snapshotDates = ARR_backfill_monthStartDates_(ARR_BACKFILL_CFG.MONTHS_BACKFILL, tz)
+    const snapshotDates = ARR_backfill_monthStartDates_(ARR_BACKFILL_CFG.MONTHS_BACKFILL)
     if (!snapshotDates.length) {
       Logger.log('No snapshot dates to backfill. Skipping.')
       return
@@ -88,11 +86,9 @@ function write_arr_snapshot_backfill_last_6_months() {
       const orgId = String(r[keyIdxInSrc] || '').trim()
       if (!orgId) continue
 
-      const createdAt = ARR_backfill_toDate_(r[createdIdxInSrc])
+      const createdAt = ARR_backfill_parseDate_(r[createdIdxInSrc])
       if (!createdAt) continue
-
-      const createdDateStr = Utilities.formatDate(createdAt, tz, ARR_BACKFILL_CFG.SNAPSHOT_DATE_FMT)
-      rows.push({ orgId, createdDateStr, row: r })
+      rows.push({ orgId, createdAt, row: r })
     }
 
     if (!rows.length) {
@@ -124,15 +120,17 @@ function write_arr_snapshot_backfill_last_6_months() {
       const keySet = existingKeyMap.get(sd.dateStr) || new Set()
 
       for (const r of rows) {
-        if (r.createdDateStr > sd.dateStr) continue
+        const createdDateStr = ARR_snap_utcDateStr_(r.createdAt)
+        if (!createdDateStr || createdDateStr >= sd.dateStr) continue
 
+        r.row[arrIdxInSrc] = ARR_backfill_num_(r.row[arrIdxInSrc])
         const mapKey = sd.dateStr + '|' + r.orgId
         if (keySet.has(mapKey)) {
           skipped++
           continue
         }
         keySet.add(mapKey)
-        const eom = ARR_backfill_num_(r.row[arrIdxInSrc])
+        const eom = r.row[arrIdxInSrc]
         const bom = eom
         out.push([sd.dateStr].concat(r.row).concat([bom, eom, 0, 0]))
       }
@@ -147,6 +145,9 @@ function write_arr_snapshot_backfill_last_6_months() {
 
     const startRow = snap.getLastRow() + 1
     batchSetValuesCompat_(snap, startRow, 1, out, ARR_BACKFILL_CFG.WRITE_CHUNK)
+    if (typeof ARR_snap_applyCohortFormat_ === 'function') {
+      ARR_snap_applyCohortFormat_(snap)
+    }
 
     Logger.log(
       `ARR snapshot backfill: appended ${out.length} rows. ` +
@@ -159,23 +160,25 @@ function write_arr_snapshot_backfill_last_6_months() {
  * Internal helpers
  * ========================= */
 
-function ARR_backfill_monthStartDates_(monthsBack, tz) {
+function ARR_backfill_monthStartDates_(monthsBack) {
   const count = Math.max(0, Number(monthsBack) || 0)
   if (!count) return []
 
   const now = new Date()
+  const y = now.getUTCFullYear()
+  const m = now.getUTCMonth()
   const list = []
 
   for (let i = count - 1; i >= 0; i--) {
-    const d = new Date(now.getFullYear(), now.getMonth() - i, 1)
-    const dateStr = Utilities.formatDate(d, tz, ARR_BACKFILL_CFG.SNAPSHOT_DATE_FMT)
+    const d = new Date(Date.UTC(y, m - i, 1))
+    const dateStr = ARR_snap_utcDateStr_(d)
     list.push({ dateStr })
   }
 
   return list
 }
 
-function ARR_backfill_toDate_(v) {
+function ARR_backfill_parseDate_(v) {
   if (!v) return null
   if (v instanceof Date) return isNaN(v.getTime()) ? null : v
 

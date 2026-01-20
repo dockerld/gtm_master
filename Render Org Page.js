@@ -99,7 +99,8 @@ function render_org_info_view() {
       const sortedOrgs = orgs
         .map(o => ({
           orgId: String(o.org_id || '').trim(),
-          orgName: String(o.org_name || '').trim()
+          orgName: String(o.org_name || '').trim(),
+          orgCreatedAt: o.org_created_at || o.created_at || ''
         }))
         .filter(o => o.orgId || o.orgName)
         .sort((a, b) => (a.orgName || '').localeCompare(b.orgName || '') || (a.orgId || '').localeCompare(b.orgId || ''))
@@ -107,6 +108,7 @@ function render_org_info_view() {
       for (const o of sortedOrgs) {
         const orgId = o.orgId
         const orgName = o.orgName
+        const orgCreatedAt = o.orgCreatedAt
 
         const agg = memAgg.get(orgId) || { members: new Set(), owners: [], admins: [], any: [] }
         const inClerk = agg.members.size
@@ -127,16 +129,8 @@ function render_org_info_view() {
         const diff = (Number(inClerk) || 0) - (Number(seats) || 0)
 
         const trialOwnerEmail = ORGINFO_pickOrgOwnerEmail_(membershipsByOrgId.get(orgId) || []) || ownerEmail
-        const ownerKey = ORGINFO_normEmail_(trialOwnerEmail)
-        const ownerUser = ownerKey ? (userByEmailKey.get(ownerKey) || null) : null
-        const trialStart = ORGINFO_toIsoOrBlank_(
-          ORGINFO_firstNonEmpty_(
-            ownerUser && ownerUser.trial_start_date,
-            ownerUser && ownerUser.trialstartdate,
-            ownerUser && ownerUser.trial_start,
-            ownerUser && ownerUser.trial_start_at
-          )
-        )
+        const orgCreatedIso = ORGINFO_toIsoOrBlank_(orgCreatedAt)
+        const trialStart = orgCreatedIso
         const subRows = ORGINFO_rowsFromSubIds_(subIdsByOrgId.get(orgId), stripeBySubId)
         const trialEnd = ORGINFO_computeTrialEndIso_({
           trialStartIso: trialStart,

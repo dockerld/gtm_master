@@ -30,7 +30,10 @@ const ARR_SNAP_CFG = {
   EOM_HEADER: 'eom_arr',
   UPGRADE_HEADER: 'upgrade_arr',
   DOWNGRADE_HEADER: 'downgrade_arr',
-  WRITE_CHUNK: 3000
+  WRITE_CHUNK: 3000,
+
+  COHORT_HEADER: 'trial_cohort_month',
+  COHORT_FMT: 'MMM yyyy'
 }
 
 function write_arr_snapshot() {
@@ -46,9 +49,9 @@ function write_arr_snapshot_monthly() {
     if (!src) throw new Error(`Source sheet not found: ${ARR_SNAP_CFG.SOURCE_SHEET}`)
 
     const snap = getOrCreateSheetCompat_(ss, ARR_SNAP_CFG.SNAP_SHEET)
+    ARR_snap_pruneLatestIfNotMonthStart_(snap)
 
-    const tz = Session.getScriptTimeZone()
-    const snapshotDate = Utilities.formatDate(new Date(), tz, ARR_SNAP_CFG.SNAPSHOT_DATE_FMT)
+    const snapshotDate = ARR_snap_utcDateStr_(new Date())
 
     const maxColsFromStart = src.getLastColumn() - ARR_SNAP_CFG.START_COL + 1
     if (maxColsFromStart <= 0) throw new Error('arr_raw_data has no columns in the expected region')
@@ -128,7 +131,8 @@ function write_arr_snapshot_monthly() {
       }
       existingKeys.add(mapKey)
 
-      const eom = ARR_monthly_num_(r[arrIdxInSrc])
+      r[arrIdxInSrc] = ARR_monthly_num_(r[arrIdxInSrc])
+      const eom = r[arrIdxInSrc]
       const bom = prevMonthEomByOrg.get(key) || 0
       const delta = eom - bom
       const upgrade = delta > 0 ? delta : 0
@@ -144,12 +148,127 @@ function write_arr_snapshot_monthly() {
 
     const startRow = snap.getLastRow() + 1
     batchSetValuesCompat_(snap, startRow, 1, out, ARR_SNAP_CFG.WRITE_CHUNK)
+    ARR_snap_applyCohortFormat_(snap)
 
     Logger.log(
       `ARR snapshot ${snapshotDate}: appended ${out.length} rows. ` +
       `Skipped existing: ${skipped}. Took ${((new Date() - t0) / 1000).toFixed(2)}s`
     )
   })
+}
+
+function ARR_snap_applyCohortFormat_(sheet) {
+  const lastCol = sheet.getLastColumn()
+  const lastRow = sheet.getLastRow()
+  if (lastCol < 1 || lastRow < 2) return
+
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim())
+  const numRows = Math.max(1, sheet.getMaxRows() - 1)
+
+  const applyFmt = (headerName, fmt) => {
+    const idx = header.findIndex(h => h.toLowerCase() === String(headerName).toLowerCase())
+    if (idx < 0) return
+    sheet.getRange(2, idx + 1, numRows, 1).setNumberFormat(fmt)
+  }
+
+  applyFmt(ARR_SNAP_CFG.SNAPSHOT_DATE_HEADER, ARR_SNAP_CFG.SNAPSHOT_DATE_FMT)
+  applyFmt(ARR_SNAP_CFG.COHORT_HEADER, ARR_SNAP_CFG.COHORT_FMT)
+  applyFmt(ARR_SNAP_CFG.ARR_HEADER, '0')
+  applyFmt(ARR_SNAP_CFG.BOM_HEADER, '0')
+  applyFmt(ARR_SNAP_CFG.EOM_HEADER, '0')
+  applyFmt(ARR_SNAP_CFG.UPGRADE_HEADER, '0')
+  applyFmt(ARR_SNAP_CFG.DOWNGRADE_HEADER, '0')
+}
+
+function ARR_snap_pruneLatestIfNotMonthStart_(sheet) {
+  const lastRow = sheet.getLastRow()
+  const lastCol = sheet.getLastColumn()
+  if (lastRow < 2 || lastCol < 1) return
+
+  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim())
+  const snapIdx = header.findIndex(h => h.toLowerCase() === ARR_SNAP_CFG.SNAPSHOT_DATE_HEADER.toLowerCase())
+  if (snapIdx < 0) return
+
+  const latestKey = ARR_snap_latestSnapshotKey_(sheet, snapIdx)
+  if (!latestKey) return
+
+  const day = latestKey.split('-')[2]
+  if (day === '01') return
+
+  ARR_snap_deleteSnapshotKey_(sheet, snapIdx, latestKey)
+}
+
+function ARR_snap_latestSnapshotKey_(sheet, snapIdx) {
+  const lastRow = sheet.getLastRow()
+  if (lastRow < 2) return ''
+
+  const vals = sheet.getRange(2, snapIdx + 1, lastRow - 1, 1).getValues()
+  let best = ''
+
+  for (const r of vals) {
+    const key = ARR_snap_normSnapshotKey_(r[0])
+    if (!key) continue
+    if (!best || key > best) best = key
+  }
+
+  return best
+}
+
+function ARR_snap_deleteSnapshotKey_(sheet, snapIdx, snapshotKey) {
+  const lastRow = sheet.getLastRow()
+  if (lastRow < 2) return
+
+  const vals = sheet.getRange(2, snapIdx + 1, lastRow - 1, 1).getValues()
+  const rows = []
+
+  for (let i = 0; i < vals.length; i++) {
+    const key = ARR_snap_normSnapshotKey_(vals[i][0])
+    if (key === snapshotKey) rows.push(i + 2)
+  }
+
+  if (!rows.length) return
+
+  rows.sort((a, b) => a - b)
+  const ranges = []
+  let start = rows[0]
+  let prev = rows[0]
+
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i]
+    if (r === prev + 1) {
+      prev = r
+      continue
+    }
+    ranges.push([start, prev])
+    start = r
+    prev = r
+  }
+  ranges.push([start, prev])
+
+  for (let i = ranges.length - 1; i >= 0; i--) {
+    const range = ranges[i]
+    sheet.deleteRows(range[0], range[1] - range[0] + 1)
+  }
+}
+
+function ARR_snap_normSnapshotKey_(v) {
+  if (!v) return ''
+  if (v instanceof Date) return ARR_snap_utcDateStr_(v)
+
+  const s = String(v || '').trim()
+  if (!s) return ''
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s
+
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? '' : ARR_snap_utcDateStr_(d)
+}
+
+function ARR_snap_utcDateStr_(d) {
+  if (!(d instanceof Date) || isNaN(d.getTime())) return ''
+  const y = d.getUTCFullYear()
+  const m = ARR_monthly_pad2_(d.getUTCMonth() + 1)
+  const day = ARR_monthly_pad2_(d.getUTCDate())
+  return String(y) + '-' + m + '-' + day
 }
 
 function ARR_monthly_buildPrevMonthEomByOrg_(sheet, snapshotDateStr, snapDateHeader, keyHeader, eomHeader, arrHeader) {

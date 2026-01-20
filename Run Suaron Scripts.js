@@ -12,6 +12,7 @@
  * 6) render_sauron_view
  * 7) writeSyncLog summary
  * 8) ARR + analytics sheets (no backfill)
+ * 9) Paying Users snapshot
  *
  * Notes:
  * - Each step is wrapped so one failure does not stop later steps
@@ -43,6 +44,7 @@ function run_daily_pipeline() {
       { name: 'render_arr_raw_data_view',        fn: render_arr_raw_data_view },
       { name: 'write_arr_snapshot',              fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts',      fn: render_arr_waterfall_facts },
+      { name: 'render_paying_users_snapshot',    fn: render_paying_users_snapshot },
 
       { name: 'render_sauron_view',              fn: render_sauron_view },
       { name: 'render_ring_view',                fn: render_ring_view },

@@ -18,6 +18,7 @@
 
 const CONV_CFG = {
   SHEET_NAME: 'Conversion stats',
+  AUDIT_SHEET: 'Conversion stats audit',
   HEADER_ROW: 1,
   DATA_START_ROW: 2,
 
@@ -27,13 +28,18 @@ const CONV_CFG = {
   },
 
   MONTH_FMT: 'yyyy-MM',
+  DATE_FMT: 'MM-dd-yy',
   HEADERS: [
     'cohort_month',
     'orgs_signed_up',
-    'orgs_converted',
-    'conversion_rate',
-    'orgs_converted_within_7d_trial_end',
-    'conversion_rate_within_7d_trial_end'
+    'orgs_subscribed',
+    'sub_rate',
+    'orgs_paid',
+    'conv_rate',
+    'orgs_paid_7d',
+    'paid_7d_rate',
+    'orgs_in_7d_window',
+    'paid_7d_potential_rate'
   ],
   COUNT_FMT: '0',
   PCT_FMT: '0.0%'
@@ -56,6 +62,7 @@ function render_org_conversion_stats() {
     const orgs = CONV_readSheetObjects_(shOrgs, 1)
     const orgInfo = CONV_readSheetObjects_(shOrgInfo, 1)
     const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
+    const now = new Date()
 
     const statsByMonth = new Map()
 
@@ -73,19 +80,27 @@ function render_org_conversion_stats() {
       bucket.total += 1
 
       const info = orgInfoById.get(orgId) || {}
-      const hasConversion = !!info.subscriptionStartDate
-      if (hasConversion) bucket.converted += 1
+      const hasSubscription = !!info.subscriptionStartDate
+      if (hasSubscription) bucket.subscribed += 1
 
       const trialStart = info.trialStartDate || null
       const trialEnd = info.trialEndDate || null
       const firstPaymentDate = info.purchaseDate || null
       const trialWindowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
+      if (firstPaymentDate) bucket.paid += 1
       const within7d =
         trialStart &&
         trialWindowEnd &&
         firstPaymentDate &&
         CONV_isWithinRange_(firstPaymentDate, trialStart, trialWindowEnd)
-      if (within7d) bucket.convertedWithin7d += 1
+      if (within7d) bucket.paidWithin7d += 1
+
+      const inWindowUnpaid =
+        !within7d &&
+        trialStart &&
+        trialWindowEnd &&
+        CONV_isWithinRange_(now, trialStart, trialWindowEnd)
+      if (inWindowUnpaid) bucket.inWindowUnpaid += 1
     })
 
     const outRows = CONV_buildRows_(statsByMonth)
@@ -107,13 +122,125 @@ function render_org_conversion_stats() {
   })
 }
 
+function render_org_conversion_audit() {
+  CONV_lockWrapCompat_('render_org_conversion_audit', () => {
+    const t0 = new Date()
+    const ss = SpreadsheetApp.getActive()
+
+    const shOut = CONV_getOrCreateSheetCompat_(ss, CONV_CFG.AUDIT_SHEET)
+    const shOrgs = ss.getSheetByName(CONV_CFG.INPUTS.CLERK_ORGS)
+    const shOrgInfo = ss.getSheetByName(CONV_CFG.INPUTS.ORG_INFO)
+
+    if (!shOrgs) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.CLERK_ORGS}`)
+    if (!shOrgInfo) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ORG_INFO}`)
+
+    const tz = Session.getScriptTimeZone()
+
+    const orgs = CONV_readSheetObjects_(shOrgs, 1)
+    const orgInfo = CONV_readSheetObjects_(shOrgInfo, 1)
+
+    const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
+
+    const headers = [
+      'org_id',
+      'org_name',
+      'org_created_at',
+      'cohort_month',
+      'trial_start_date',
+      'trial_end_date',
+      'subscription_start_date',
+      'purchase_date',
+      'clean_window_start',
+      'clean_window_end',
+      'has_conversion',
+      'clean_conversion',
+      'notes'
+    ]
+
+    const rows = []
+    orgs.forEach(o => {
+      const orgId = CONV_str_(o.org_id)
+      if (!orgId) return
+
+      const orgName = CONV_str_(o.org_name) || CONV_str_(o.org_slug)
+      const orgCreatedAt = CONV_parseDate_(o.created_at || o.org_created_at)
+      const cohortMonth = orgCreatedAt ? Utilities.formatDate(orgCreatedAt, tz, CONV_CFG.MONTH_FMT) : ''
+
+      const info = orgInfoById.get(orgId) || {}
+      const trialStart = info.trialStartDate || null
+      const trialEnd = info.trialEndDate || null
+      const subscriptionStart = info.subscriptionStartDate || null
+      const purchaseDate = info.purchaseDate || null
+
+      const windowStart = trialStart
+      const windowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
+
+      const hasConversion = !!subscriptionStart
+      const cleanConversion =
+        !!windowStart &&
+        !!windowEnd &&
+        !!purchaseDate &&
+        CONV_isWithinRange_(purchaseDate, windowStart, windowEnd)
+
+      const notes = []
+      if (!trialStart) notes.push('missing_trial_start')
+      if (!trialEnd) notes.push('missing_trial_end')
+      if (!purchaseDate) notes.push('missing_purchase_date')
+
+      rows.push([
+        orgId,
+        orgName,
+        orgCreatedAt || '',
+        cohortMonth,
+        trialStart || '',
+        trialEnd || '',
+        subscriptionStart || '',
+        purchaseDate || '',
+        windowStart || '',
+        windowEnd || '',
+        hasConversion,
+        cleanConversion,
+        notes.join(';')
+      ])
+    })
+
+    rows.sort((a, b) => {
+      const aC = String(a[3] || '')
+      const bC = String(b[3] || '')
+      if (aC !== bC) return aC.localeCompare(bC)
+      return String(a[1] || '').localeCompare(String(b[1] || ''))
+    })
+
+    shOut.clearContents()
+    shOut.getRange(CONV_CFG.HEADER_ROW, 1, 1, headers.length).setValues([headers])
+    if (rows.length) {
+      CONV_batchSetValuesCompat_(shOut, CONV_CFG.DATA_START_ROW, 1, rows, 2000)
+    }
+
+    CONV_applyAuditFormats_(shOut, rows.length, headers)
+    shOut.setFrozenRows(CONV_CFG.HEADER_ROW)
+    shOut.autoResizeColumns(1, headers.length)
+
+    const seconds = (new Date() - t0) / 1000
+    CONV_writeSyncLogCompat_('render_org_conversion_audit', 'ok', rows.length, rows.length, seconds, '')
+    return { rows_out: rows.length }
+  })
+}
+
 /* =========================
  * Core logic
  * ========================= */
 
 function CONV_getBucket_(map, monthKey) {
   if (!map.has(monthKey)) {
-    map.set(monthKey, { month: monthKey, total: 0, converted: 0, convertedWithin7d: 0 })
+    map.set(monthKey, {
+      month: monthKey,
+      total: 0,
+      subscribed: 0,
+      paid: 0,
+      paidWithin7d: 0,
+      inWindowUnpaid: 0
+    })
   }
   return map.get(monthKey)
 }
@@ -123,11 +250,27 @@ function CONV_buildRows_(statsByMonth) {
   return keys.map(k => {
     const s = statsByMonth.get(k)
     const total = s.total || 0
-    const conv = s.converted || 0
-    const pct = total ? conv / total : 0
-    const conv7d = s.convertedWithin7d || 0
-    const pct7d = total ? conv7d / total : 0
-    return [s.month, total, conv, pct, conv7d, pct7d]
+    const subscribed = s.subscribed || 0
+    const subRate = total ? subscribed / total : 0
+    const paid = s.paid || 0
+    const convRate = total ? paid / total : 0
+    const paid7d = s.paidWithin7d || 0
+    const paid7dRate = total ? paid7d / total : 0
+    const inWindow = s.inWindowUnpaid || 0
+    const paid7dPotentialRate = total ? (paid7d + inWindow) / total : 0
+
+    return [
+      s.month,
+      total,
+      subscribed,
+      subRate,
+      paid,
+      convRate,
+      paid7d,
+      paid7dRate,
+      inWindow,
+      paid7dPotentialRate
+    ]
   })
 }
 
@@ -191,16 +334,51 @@ function CONV_applyFormats_(sheet, numDataRows) {
   const nRows = numDataRows
 
   const colTotal = CONV_CFG.HEADERS.indexOf('orgs_signed_up') + 1
-  const colConverted = CONV_CFG.HEADERS.indexOf('orgs_converted') + 1
-  const colPct = CONV_CFG.HEADERS.indexOf('conversion_rate') + 1
-  const colConv7d = CONV_CFG.HEADERS.indexOf('orgs_converted_within_7d_trial_end') + 1
-  const colPct7d = CONV_CFG.HEADERS.indexOf('conversion_rate_within_7d_trial_end') + 1
+  const colSubscribed = CONV_CFG.HEADERS.indexOf('orgs_subscribed') + 1
+  const colSubRate = CONV_CFG.HEADERS.indexOf('sub_rate') + 1
+  const colPaid = CONV_CFG.HEADERS.indexOf('orgs_paid') + 1
+  const colConvRate = CONV_CFG.HEADERS.indexOf('conv_rate') + 1
+  const colPaid7d = CONV_CFG.HEADERS.indexOf('orgs_paid_7d') + 1
+  const colPaid7dRate = CONV_CFG.HEADERS.indexOf('paid_7d_rate') + 1
+  const colInWindow = CONV_CFG.HEADERS.indexOf('orgs_in_7d_window') + 1
+  const colPotentialRate = CONV_CFG.HEADERS.indexOf('paid_7d_potential_rate') + 1
 
   if (colTotal > 0) sheet.getRange(startRow, colTotal, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
-  if (colConverted > 0) sheet.getRange(startRow, colConverted, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
-  if (colPct > 0) sheet.getRange(startRow, colPct, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
-  if (colConv7d > 0) sheet.getRange(startRow, colConv7d, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
-  if (colPct7d > 0) sheet.getRange(startRow, colPct7d, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
+  if (colSubscribed > 0) sheet.getRange(startRow, colSubscribed, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
+  if (colSubRate > 0) sheet.getRange(startRow, colSubRate, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
+  if (colPaid > 0) sheet.getRange(startRow, colPaid, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
+  if (colConvRate > 0) sheet.getRange(startRow, colConvRate, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
+  if (colPaid7d > 0) sheet.getRange(startRow, colPaid7d, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
+  if (colPaid7dRate > 0) sheet.getRange(startRow, colPaid7dRate, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
+  if (colInWindow > 0) sheet.getRange(startRow, colInWindow, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
+  if (colPotentialRate > 0) sheet.getRange(startRow, colPotentialRate, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
+}
+
+function CONV_applyAuditFormats_(sheet, numDataRows, headers) {
+  const headerRange = sheet.getRange(1, 1, 1, headers.length)
+  headerRange.setFontWeight('bold').setBackground('#F3F3F3')
+
+  if (!numDataRows) return
+
+  const startRow = CONV_CFG.DATA_START_ROW
+  const nRows = numDataRows
+
+  const dateHeaders = new Set([
+    'org_created_at',
+    'trial_start_date',
+    'trial_end_date',
+    'subscription_start_date',
+    'purchase_date',
+    'clean_window_start',
+    'clean_window_end'
+  ])
+
+  headers.forEach((h, idx) => {
+    const col = idx + 1
+    if (dateHeaders.has(h)) {
+      sheet.getRange(startRow, col, nRows, 1).setNumberFormat(CONV_CFG.DATE_FMT)
+    }
+  })
 }
 
 /* =========================

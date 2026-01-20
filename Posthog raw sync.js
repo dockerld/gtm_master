@@ -6,6 +6,7 @@
  *
  * Pulls (per email_key):
  *  - meetings_recorded
+ *  - hours_recorded
  *  - ask_meeting
  *  - ask_global
  *  - client_page_views
@@ -123,24 +124,25 @@ function posthog_pull_user_metrics_to_raw() {
           email: String(r?.[1] || ''),
 
           meetings_recorded: Number(r?.[2] ?? 0),
-          ask_meeting: Number(r?.[3] ?? 0),
-          ask_global: Number(r?.[4] ?? 0),
-          clients_count: Number(r?.[5] ?? 0),
+          hours_recorded: Number(r?.[3] ?? 0),
+          ask_meeting: Number(r?.[4] ?? 0),
+          ask_global: Number(r?.[5] ?? 0),
+          clients_count: Number(r?.[6] ?? 0),
 
-          calendar_connected: String(r?.[6] || '').toLowerCase() === 'yes',
-          first_calendar_connected_date: String(r?.[7] || ''),
+          calendar_connected: String(r?.[7] || '').toLowerCase() === 'yes',
+          first_calendar_connected_date: String(r?.[8] || ''),
 
-          email_connected: String(r?.[8] || '').toLowerCase() === 'yes',
-          first_email_connected_date: String(r?.[9] || ''),
+          email_connected: String(r?.[9] || '').toLowerCase() === 'yes',
+          first_email_connected_date: String(r?.[10] || ''),
 
-          pm_karbon_connected: String(r?.[10] || '').toLowerCase() === 'yes',
-          pm_karbon_first_connected_date: String(r?.[11] || ''),
+          pm_karbon_connected: String(r?.[11] || '').toLowerCase() === 'yes',
+          pm_karbon_first_connected_date: String(r?.[12] || ''),
 
-          pm_keeper_connected: String(r?.[12] || '').toLowerCase() === 'yes',
-          pm_keeper_first_connected_date: String(r?.[13] || ''),
+          pm_keeper_connected: String(r?.[13] || '').toLowerCase() === 'yes',
+          pm_keeper_first_connected_date: String(r?.[14] || ''),
 
-          pm_financial_cents_connected: String(r?.[14] || '').toLowerCase() === 'yes',
-          pm_financial_cents_first_connected_date: String(r?.[15] || '')
+          pm_financial_cents_connected: String(r?.[15] || '').toLowerCase() === 'yes',
+          pm_financial_cents_first_connected_date: String(r?.[16] || '')
         })
       })
     }
@@ -178,6 +180,7 @@ function posthog_pull_user_metrics_to_raw() {
     'email',
 
     'meetings_recorded',
+    'hours_recorded',
     'ask_meeting',
     'ask_global',
     'client_page_views',
@@ -206,6 +209,7 @@ function posthog_pull_user_metrics_to_raw() {
       email: '',
 
       meetings_recorded: 0,
+      hours_recorded: 0,
       ask_meeting: 0,
       ask_global: 0,
       clients_count: 0,
@@ -234,6 +238,7 @@ function posthog_pull_user_metrics_to_raw() {
       base.email,
 
       base.meetings_recorded,
+      base.hours_recorded,
       base.ask_meeting,
       base.ask_global,
       clientViews,
@@ -291,12 +296,23 @@ WITH [${quoted}] AS input_emails
   WHERE lower(u.email) IN (SELECT arrayJoin(input_emails))
 )
 
-, meeting_counts AS (
+ , meeting_bot_stats AS (
   SELECT
-    m.user_id,
-    countIf(m.recorded_event_id IS NOT NULL) AS meetings_recorded
-  FROM postgres.meetings AS m
-  GROUP BY m.user_id
+    mb.user_id,
+    countIf(
+      mb.recording_started_at IS NOT NULL
+      AND mb.recording_ended_at IS NOT NULL
+    ) AS meetings_recorded,
+    round(
+      sumIf(
+        dateDiff('second', mb.recording_started_at, mb.recording_ended_at),
+        mb.recording_started_at IS NOT NULL
+        AND mb.recording_ended_at IS NOT NULL
+      ) / 3600,
+      2
+    ) AS hours_recorded
+  FROM postgres.meeting_bots AS mb
+  GROUP BY mb.user_id
 )
 
 , ask_counts AS (
@@ -373,7 +389,8 @@ SELECT
   u.email_key,
   u.email,
 
-  coalesce(m.meetings_recorded, 0) AS meetings_recorded,
+  coalesce(mbs.meetings_recorded, 0) AS meetings_recorded,
+  coalesce(mbs.hours_recorded, 0) AS hours_recorded,
   coalesce(a.ask_meeting, 0) AS ask_meeting,
   coalesce(a.ask_global, 0)  AS ask_global,
 
@@ -395,7 +412,7 @@ SELECT
   coalesce(o.pm_financial_cents_first_connected_date, '') AS pm_financial_cents_first_connected_date
 
 FROM base_users AS u
-LEFT JOIN meeting_counts          AS m    ON m.user_id = u.user_id
+LEFT JOIN meeting_bot_stats       AS mbs  ON mbs.user_id = u.user_id
 LEFT JOIN ask_counts              AS a    ON a.user_id = u.user_id
 LEFT JOIN clients_count_per_user  AS ccpu ON ccpu.user_id = u.user_id
 LEFT JOIN oauth_rollup            AS o    ON o.user_id = u.user_id

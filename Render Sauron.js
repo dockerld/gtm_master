@@ -43,6 +43,7 @@ const SAURON_CFG = {
     'Days with Ping',
     'Days since last Login',
     'Meetings Recorded',
+    'Hours Recorded',
     'Logged in #',
     'Active Days (PostHog)',
     '# of Seats',
@@ -300,6 +301,7 @@ function render_sauron_view() {
 
         const clientsCount = (u.clients_count != null) ? u.clients_count : ''
         const meetingsRecorded = (u.meetings_recorded != null) ? u.meetings_recorded : ''
+        const hoursRecorded = (u.hours_recorded != null) ? u.hours_recorded : ''
         const askMeeting = (u.ask_meeting != null) ? u.ask_meeting : ''
         const askGlobal = (u.ask_global != null) ? u.ask_global : ''
         const clientViews = (u.client_page_views != null) ? u.client_page_views : ''
@@ -325,6 +327,7 @@ function render_sauron_view() {
           'Days with Ping': daysWithPing,
           'Days since last Login': daysSinceLastLogin,
           'Meetings Recorded': meetingsRecorded,
+          'Hours Recorded': hoursRecorded,
           'Logged in #': loggedInDays,
           'Active Days (PostHog)': activeDaysPosthog,
           '# of Seats': seats,

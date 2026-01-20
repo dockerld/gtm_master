@@ -50,6 +50,7 @@ function onOpen() {
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addItem('Run Onboarding stats', 'ui_run_onboarding_stats')
     .addItem('Run Conversion stats', 'ui_run_conversion_stats')
+    .addItem('Run Conversion audit', 'ui_run_conversion_audit')
     .addSeparator()
     .addItem('Push UpSale targets to Notion', 'ui_push_upsale_targets_to_notion') // ✅ NEW
     .addToUi()
@@ -137,6 +138,14 @@ function ui_run_conversion_stats() {
   return uiRunWrapped_('ui_run_conversion_stats', () => {
     runSteps_([
       { name: 'render_org_conversion_stats', fn: render_org_conversion_stats }
+    ])
+  })
+}
+
+function ui_run_conversion_audit() {
+  return uiRunWrapped_('ui_run_conversion_audit', () => {
+    runSteps_([
+      { name: 'render_org_conversion_audit', fn: render_org_conversion_audit }
     ])
   })
 }
