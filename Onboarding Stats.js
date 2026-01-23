@@ -8,7 +8,6 @@
  * - Calendar connected
  * - Email connected
  * - PM connected (any provider)
- * Includes "within 2 weeks of account creation" variants.
  **************************************************************/
 
 const ONB_CFG = {
@@ -29,27 +28,18 @@ const ONB_CFG = {
 
     'calendar_connected_count',
     'calendar_connected_pct',
-    'calendar_connected_within_2w_count',
-    'calendar_connected_within_2w_pct',
 
     'email_connected_count',
     'email_connected_pct',
-    'email_connected_within_2w_count',
-    'email_connected_within_2w_pct',
 
     'pm_connected_count',
-    'pm_connected_pct',
-    'pm_connected_within_2w_count',
-    'pm_connected_within_2w_pct'
+    'pm_connected_pct'
   ],
 
   PCT_HEADERS: [
     'calendar_connected_pct',
-    'calendar_connected_within_2w_pct',
     'email_connected_pct',
-    'email_connected_within_2w_pct',
-    'pm_connected_pct',
-    'pm_connected_within_2w_pct'
+    'pm_connected_pct'
   ],
 
   COUNT_FMT: '0',
@@ -57,37 +47,11 @@ const ONB_CFG = {
 }
 
 function render_onboarding_stats() {
-  ONB_lockWrapCompat_('render_onboarding_stats', () => {
-    const t0 = new Date()
-    const ss = SpreadsheetApp.getActive()
-
-    const shOut = ONB_getOrCreateSheetCompat_(ss, ONB_CFG.SHEET_NAME)
-    const shPosthog = ss.getSheetByName(ONB_CFG.POSTHOG_SHEET)
-    const shClerk = ss.getSheetByName(ONB_CFG.CLERK_SHEET)
-
-    if (!shPosthog) throw new Error(`Missing input sheet: ${ONB_CFG.POSTHOG_SHEET}`)
-    if (!shClerk) throw new Error(`Missing input sheet: ${ONB_CFG.CLERK_SHEET}`)
-
-    const tz = Session.getScriptTimeZone()
-
-    const createdByEmailKey = ONB_buildCreatedAtIndex_(shClerk)
-    const stats = ONB_buildStats_(shPosthog, createdByEmailKey, tz)
-    const outRows = ONB_buildRows_(stats.byMonth, stats.summary)
-
-    shOut.clearContents()
-    shOut.getRange(ONB_CFG.HEADER_ROW, 1, 1, ONB_CFG.HEADERS.length).setValues([ONB_CFG.HEADERS])
-
-    if (outRows.length) {
-      ONB_batchSetValuesCompat_(shOut, ONB_CFG.DATA_START_ROW, 1, outRows, 3000)
+  return ONB_lockWrapCompat_('render_onboarding_stats', () => {
+    if (typeof COMBINED_renderConversionOnboarding_ !== 'function') {
+      throw new Error('Combined stats renderer not available.')
     }
-
-    ONB_applyFormats_(shOut, outRows.length, stats.monthCount, stats.summaryCount)
-    shOut.setFrozenRows(ONB_CFG.HEADER_ROW)
-    shOut.autoResizeColumns(1, ONB_CFG.HEADERS.length)
-
-    const seconds = (new Date() - t0) / 1000
-    ONB_writeSyncLogCompat_('render_onboarding_stats', 'ok', outRows.length, outRows.length, seconds, '')
-    return { rows_out: outRows.length }
+    return COMBINED_renderConversionOnboarding_({ logStepName: 'render_onboarding_stats' })
   })
 }
 
@@ -290,11 +254,8 @@ function ONB_rowFromBucket_(bucket) {
   const total = bucket.total || 0
 
   const calPct = total ? bucket.calendar.connected / total : 0
-  const cal2wPct = total ? bucket.calendar.within2w / total : 0
   const emailPct = total ? bucket.email.connected / total : 0
-  const email2wPct = total ? bucket.email.within2w / total : 0
   const pmPct = total ? bucket.pm.connected / total : 0
-  const pm2wPct = total ? bucket.pm.within2w / total : 0
 
   return [
     bucket.month,
@@ -302,18 +263,12 @@ function ONB_rowFromBucket_(bucket) {
 
     bucket.calendar.connected,
     calPct,
-    bucket.calendar.within2w,
-    cal2wPct,
 
     bucket.email.connected,
     emailPct,
-    bucket.email.within2w,
-    email2wPct,
 
     bucket.pm.connected,
-    pmPct,
-    bucket.pm.within2w,
-    pm2wPct
+    pmPct
   ]
 }
 
@@ -322,12 +277,16 @@ function ONB_rowFromBucket_(bucket) {
  * ========================= */
 
 function ONB_applyFormats_(sheet, numDataRows, monthCount, summaryCount) {
-  const headerRange = sheet.getRange(ONB_CFG.HEADER_ROW, 1, 1, ONB_CFG.HEADERS.length)
+  return ONB_applyFormatsAt_(sheet, ONB_CFG.HEADER_ROW, ONB_CFG.DATA_START_ROW, numDataRows, monthCount, summaryCount)
+}
+
+function ONB_applyFormatsAt_(sheet, headerRow, dataStartRow, numDataRows, monthCount, summaryCount) {
+  const headerRange = sheet.getRange(headerRow, 1, 1, ONB_CFG.HEADERS.length)
   headerRange.setFontWeight('bold').setBackground('#F3F3F3')
 
   if (!numDataRows) return
 
-  const startRow = ONB_CFG.DATA_START_ROW
+  const startRow = dataStartRow
   const nRows = numDataRows
 
   const countCols = ONB_CFG.HEADERS
@@ -347,7 +306,7 @@ function ONB_applyFormats_(sheet, numDataRows, monthCount, summaryCount) {
   const summaryRows = Number(summaryCount || 0)
   const monthlyRows = Number(monthCount || 0)
   if (summaryRows > 0 && monthlyRows >= 0) {
-    const summaryStart = ONB_CFG.DATA_START_ROW + monthlyRows
+    const summaryStart = dataStartRow + monthlyRows
     sheet.getRange(summaryStart, 1, summaryRows, ONB_CFG.HEADERS.length)
       .setFontWeight('bold')
       .setBackground('#F6F4F0')

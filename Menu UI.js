@@ -48,8 +48,7 @@ function onOpen() {
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
-    .addItem('Run Onboarding stats', 'ui_run_onboarding_stats')
-    .addItem('Run Conversion stats', 'ui_run_conversion_stats')
+    .addItem('Run Conversion & Onboarding stats', 'ui_run_conversion_onboarding_stats')
     .addItem('Run Conversion audit', 'ui_run_conversion_audit')
     .addSeparator()
     .addItem('Push UpSale targets to Notion', 'ui_push_upsale_targets_to_notion') // ✅ NEW
@@ -126,20 +125,20 @@ function ui_run_arr_refresh() {
   })
 }
 
-function ui_run_onboarding_stats() {
-  return uiRunWrapped_('ui_run_onboarding_stats', () => {
+function ui_run_conversion_onboarding_stats() {
+  return uiRunWrapped_('ui_run_conversion_onboarding_stats', () => {
     runSteps_([
-      { name: 'render_onboarding_stats', fn: render_onboarding_stats }
+      { name: 'render_conversion_onboarding_stats', fn: render_conversion_onboarding_stats }
     ])
   })
 }
 
+function ui_run_onboarding_stats() {
+  return ui_run_conversion_onboarding_stats()
+}
+
 function ui_run_conversion_stats() {
-  return uiRunWrapped_('ui_run_conversion_stats', () => {
-    runSteps_([
-      { name: 'render_org_conversion_stats', fn: render_org_conversion_stats }
-    ])
-  })
+  return ui_run_conversion_onboarding_stats()
 }
 
 function ui_run_conversion_audit() {

@@ -86,7 +86,7 @@ function render_org_info_view() {
       // Trial logic indexes (org-based, same as arr_raw_data)
       const membershipsByOrgId = ORGINFO_buildMembershipsByOrgId_(mems) // orgId -> [{email,email_key,role,created_at}]
       const userByEmailKey = ORGINFO_buildUsersByEmailKey_(users)       // email_key -> user obj
-      const subIdsByOrgId = ORGINFO_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey)
+      const subIdsByOrgId = ORGINFO_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users)
       const stripeBySubId = ORGINFO_buildStripeBySubscriptionId_(subs)
 
       // Seats from Stripe: build indexes
@@ -254,7 +254,7 @@ function ORGINFO_buildSubIdByEmailKey_(source) {
     ;(source || []).forEach(u => {
       const emailKeyRaw = String(u.email_key || u.email || '').trim()
       const emailKey = normalizeEmailCompat_(emailKeyRaw)
-      const subId = String(u.stripe_subscription_id || '').trim()
+      const subId = String(u.stripe_subscription_id || u.stripeSubscriptionId || '').trim()
       if (!emailKey || !subId) return
       out.set(emailKey, subId)
     })
@@ -435,18 +435,27 @@ function ORGINFO_buildUsersByEmailKey_(users) {
   return out
 }
 
-function ORGINFO_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {
+function ORGINFO_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users) {
   const out = new Map()
 
   ;(membershipsByOrgId || new Map()).forEach((members, orgId) => {
-    const set = new Set()
+    const set = out.get(orgId) || new Set()
     ;(members || []).forEach(m => {
       const key = ORGINFO_normEmail_(m.email_key || m.email)
       if (!key) return
       const u = userByEmailKey.get(key)
-      const subId = ORGINFO_str_(u && u.stripe_subscription_id)
+      const subId = ORGINFO_str_(u && (u.stripe_subscription_id || u.stripeSubscriptionId))
       if (subId) set.add(subId)
     })
+    out.set(orgId, set)
+  })
+
+  ;(users || []).forEach(u => {
+    const orgId = ORGINFO_str_(u.org_id)
+    const subId = ORGINFO_str_(u.stripe_subscription_id || u.stripeSubscriptionId)
+    if (!orgId || !subId) return
+    const set = out.get(orgId) || new Set()
+    set.add(subId)
     out.set(orgId, set)
   })
 

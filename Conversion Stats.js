@@ -46,79 +46,11 @@ const CONV_CFG = {
 }
 
 function render_org_conversion_stats() {
-  CONV_lockWrapCompat_('render_org_conversion_stats', () => {
-    const t0 = new Date()
-    const ss = SpreadsheetApp.getActive()
-
-    const shOut = CONV_getOrCreateSheetCompat_(ss, CONV_CFG.SHEET_NAME)
-    const shOrgs = ss.getSheetByName(CONV_CFG.INPUTS.CLERK_ORGS)
-    const shOrgInfo = ss.getSheetByName(CONV_CFG.INPUTS.ORG_INFO)
-
-    if (!shOrgs) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.CLERK_ORGS}`)
-    if (!shOrgInfo) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ORG_INFO}`)
-
-    const tz = Session.getScriptTimeZone()
-
-    const orgs = CONV_readSheetObjects_(shOrgs, 1)
-    const orgInfo = CONV_readSheetObjects_(shOrgInfo, 1)
-    const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
-    const now = new Date()
-
-    const statsByMonth = new Map()
-
-    orgs.forEach(o => {
-      const orgId = CONV_str_(o.org_id)
-      if (!orgId) return
-
-      const createdAt = CONV_parseDate_(o.created_at || o.org_created_at)
-      if (!createdAt) return
-
-      const cohortMonth = Utilities.formatDate(createdAt, tz, CONV_CFG.MONTH_FMT)
-      if (!cohortMonth) return
-
-      const bucket = CONV_getBucket_(statsByMonth, cohortMonth)
-      bucket.total += 1
-
-      const info = orgInfoById.get(orgId) || {}
-      const hasSubscription = !!info.subscriptionStartDate
-      if (hasSubscription) bucket.subscribed += 1
-
-      const trialStart = info.trialStartDate || null
-      const trialEnd = info.trialEndDate || null
-      const firstPaymentDate = info.purchaseDate || null
-      const trialWindowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
-      if (firstPaymentDate) bucket.paid += 1
-      const within7d =
-        trialStart &&
-        trialWindowEnd &&
-        firstPaymentDate &&
-        CONV_isWithinRange_(firstPaymentDate, trialStart, trialWindowEnd)
-      if (within7d) bucket.paidWithin7d += 1
-
-      const inWindowUnpaid =
-        !within7d &&
-        trialStart &&
-        trialWindowEnd &&
-        CONV_isWithinRange_(now, trialStart, trialWindowEnd)
-      if (inWindowUnpaid) bucket.inWindowUnpaid += 1
-    })
-
-    const outRows = CONV_buildRows_(statsByMonth)
-
-    shOut.clearContents()
-    shOut.getRange(CONV_CFG.HEADER_ROW, 1, 1, CONV_CFG.HEADERS.length).setValues([CONV_CFG.HEADERS])
-
-    if (outRows.length) {
-      CONV_batchSetValuesCompat_(shOut, CONV_CFG.DATA_START_ROW, 1, outRows, 2000)
+  return CONV_lockWrapCompat_('render_org_conversion_stats', () => {
+    if (typeof COMBINED_renderConversionOnboarding_ !== 'function') {
+      throw new Error('Combined stats renderer not available.')
     }
-
-    CONV_applyFormats_(shOut, outRows.length)
-    shOut.setFrozenRows(CONV_CFG.HEADER_ROW)
-    shOut.autoResizeColumns(1, CONV_CFG.HEADERS.length)
-
-    const seconds = (new Date() - t0) / 1000
-    CONV_writeSyncLogCompat_('render_org_conversion_stats', 'ok', outRows.length, outRows.length, seconds, '')
-    return { rows_out: outRows.length }
+    return COMBINED_renderConversionOnboarding_({ logStepName: 'render_org_conversion_stats' })
   })
 }
 
@@ -245,9 +177,56 @@ function CONV_getBucket_(map, monthKey) {
   return map.get(monthKey)
 }
 
+function CONV_collectStatsByMonth_(shOrgs, shOrgInfo, tz) {
+  const orgs = CONV_readSheetObjects_(shOrgs, 1)
+  const orgInfo = CONV_readSheetObjects_(shOrgInfo, 1)
+  const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
+  const now = new Date()
+  const statsByMonth = new Map()
+
+  orgs.forEach(o => {
+    const orgId = CONV_str_(o.org_id)
+    if (!orgId) return
+
+    const createdAt = CONV_parseDate_(o.created_at || o.org_created_at)
+    if (!createdAt) return
+
+    const cohortMonth = Utilities.formatDate(createdAt, tz, CONV_CFG.MONTH_FMT)
+    if (!cohortMonth) return
+
+    const bucket = CONV_getBucket_(statsByMonth, cohortMonth)
+    bucket.total += 1
+
+    const info = orgInfoById.get(orgId) || {}
+    const hasSubscription = !!info.subscriptionStartDate
+    if (hasSubscription) bucket.subscribed += 1
+
+    const trialStart = info.trialStartDate || null
+    const trialEnd = info.trialEndDate || null
+    const firstPaymentDate = info.purchaseDate || null
+    const trialWindowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
+    if (firstPaymentDate) bucket.paid += 1
+    const within7d =
+      trialStart &&
+      trialWindowEnd &&
+      firstPaymentDate &&
+      CONV_isWithinRange_(firstPaymentDate, trialStart, trialWindowEnd)
+    if (within7d) bucket.paidWithin7d += 1
+
+    const inWindowUnpaid =
+      !within7d &&
+      trialStart &&
+      trialWindowEnd &&
+      CONV_isWithinRange_(now, trialStart, trialWindowEnd)
+    if (inWindowUnpaid) bucket.inWindowUnpaid += 1
+  })
+
+  return statsByMonth
+}
+
 function CONV_buildRows_(statsByMonth) {
   const keys = Array.from(statsByMonth.keys()).sort()
-  return keys.map(k => {
+  const rows = keys.map(k => {
     const s = statsByMonth.get(k)
     const total = s.total || 0
     const subscribed = s.subscribed || 0
@@ -272,6 +251,42 @@ function CONV_buildRows_(statsByMonth) {
       paid7dPotentialRate
     ]
   })
+
+  if (!rows.length) return rows
+
+  let total = 0
+  let subscribed = 0
+  let paid = 0
+  let paid7d = 0
+  let inWindow = 0
+
+  rows.forEach(r => {
+    total += Number(r[1]) || 0
+    subscribed += Number(r[2]) || 0
+    paid += Number(r[4]) || 0
+    paid7d += Number(r[6]) || 0
+    inWindow += Number(r[8]) || 0
+  })
+
+  const subRate = total ? subscribed / total : 0
+  const convRate = total ? paid / total : 0
+  const paid7dRate = total ? paid7d / total : 0
+  const paid7dPotentialRate = total ? (paid7d + inWindow) / total : 0
+
+  rows.push([
+    'TOTAL',
+    total,
+    subscribed,
+    subRate,
+    paid,
+    convRate,
+    paid7d,
+    paid7dRate,
+    inWindow,
+    paid7dPotentialRate
+  ])
+
+  return rows
 }
 
 function CONV_buildOrgInfoById_(orgInfoRows) {
@@ -325,12 +340,16 @@ function CONV_key_(h) {
  * ========================= */
 
 function CONV_applyFormats_(sheet, numDataRows) {
-  const headerRange = sheet.getRange(1, 1, 1, CONV_CFG.HEADERS.length)
+  return CONV_applyFormatsAt_(sheet, CONV_CFG.HEADER_ROW, CONV_CFG.DATA_START_ROW, numDataRows)
+}
+
+function CONV_applyFormatsAt_(sheet, headerRow, dataStartRow, numDataRows) {
+  const headerRange = sheet.getRange(headerRow, 1, 1, CONV_CFG.HEADERS.length)
   headerRange.setFontWeight('bold').setBackground('#F3F3F3')
 
   if (!numDataRows) return
 
-  const startRow = CONV_CFG.DATA_START_ROW
+  const startRow = dataStartRow
   const nRows = numDataRows
 
   const colTotal = CONV_CFG.HEADERS.indexOf('orgs_signed_up') + 1
@@ -352,6 +371,13 @@ function CONV_applyFormats_(sheet, numDataRows) {
   if (colPaid7dRate > 0) sheet.getRange(startRow, colPaid7dRate, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
   if (colInWindow > 0) sheet.getRange(startRow, colInWindow, nRows, 1).setNumberFormat(CONV_CFG.COUNT_FMT)
   if (colPotentialRate > 0) sheet.getRange(startRow, colPotentialRate, nRows, 1).setNumberFormat(CONV_CFG.PCT_FMT)
+
+  const totalRow = dataStartRow + nRows - 1
+  if (totalRow >= dataStartRow) {
+    sheet.getRange(totalRow, 1, 1, CONV_CFG.HEADERS.length)
+      .setFontWeight('bold')
+      .setBackground('#F6F4F0')
+  }
 }
 
 function CONV_applyAuditFormats_(sheet, numDataRows, headers) {

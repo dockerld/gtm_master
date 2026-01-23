@@ -69,6 +69,8 @@ function PAYING_renderSnapshot_(opts) {
   }
 
   PAYING_ensureSummaryLayout_(sh)
+  const headerRow = PAYING_findHeaderRow_(sh) || PAYING_CFG.HEADER_ROW
+  const dataStartRow = headerRow + 1
 
   const subs = PAYING_readSheetObjects_(shStripe, 1)
   const users = PAYING_readSheetObjects_(shUsers, 1)
@@ -86,7 +88,7 @@ function PAYING_renderSnapshot_(opts) {
   const membershipsByOrgId = PAYING_buildMembershipsByOrgId_(mems)
   const userByEmailKey = PAYING_buildUsersByEmailKey_(users)
   const stripeBySubId = PAYING_buildStripeBySubscriptionId_(subs)
-  const subIdsByOrgId = PAYING_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey)
+  const subIdsByOrgId = PAYING_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users)
 
   const orgSubs = new Map()
   const orgNoActive = new Map()
@@ -179,26 +181,26 @@ function PAYING_renderSnapshot_(opts) {
   let lastRow = sh.getLastRow()
   let lastCol = sh.getLastColumn()
 
-  if (lastRow < PAYING_CFG.HEADER_ROW) {
+  if (lastRow < headerRow) {
     const headers = [PAYING_CFG.ID_HEADER, PAYING_CFG.NAME_HEADER, PAYING_CFG.EMAIL_HEADER]
       .concat(monthKeys.map(k => PAYING_monthLabelFromKey_(k)))
-    sh.getRange(PAYING_CFG.HEADER_ROW, 1, 1, headers.length).setValues([headers])
-    sh.setFrozenRows(PAYING_CFG.HEADER_ROW)
-    lastRow = PAYING_CFG.HEADER_ROW
+    sh.getRange(headerRow, 1, 1, headers.length).setValues([headers])
+    sh.setFrozenRows(headerRow)
+    lastRow = headerRow
     lastCol = headers.length
   } else {
-    const headerRow = sh
-      .getRange(PAYING_CFG.HEADER_ROW, 1, 1, Math.max(lastCol, 3))
+    const headerRowValues = sh
+      .getRange(headerRow, 1, 1, Math.max(lastCol, 3))
       .getValues()[0]
-      .map(h => String(h || '').trim())
+    const headerValues = headerRowValues.map(h => String(h || '').trim())
 
     const headerOk =
-      headerRow[0] === PAYING_CFG.ID_HEADER &&
-      headerRow[1] === PAYING_CFG.NAME_HEADER &&
-      headerRow[2] === PAYING_CFG.EMAIL_HEADER
+      headerValues[0] === PAYING_CFG.ID_HEADER &&
+      headerValues[1] === PAYING_CFG.NAME_HEADER &&
+      headerValues[2] === PAYING_CFG.EMAIL_HEADER
 
     if (!headerOk) {
-      sh.getRange(PAYING_CFG.HEADER_ROW, 1, 1, 3).setValues([[
+      sh.getRange(headerRow, 1, 1, 3).setValues([[
         PAYING_CFG.ID_HEADER,
         PAYING_CFG.NAME_HEADER,
         PAYING_CFG.EMAIL_HEADER
@@ -207,15 +209,32 @@ function PAYING_renderSnapshot_(opts) {
     }
 
     const existingMonthKeys = new Set()
-    headerRow.slice(3).forEach(h => {
+    const existingMonthList = []
+    headerRowValues.slice(3).forEach(h => {
       const key = PAYING_monthKeyFromHeader_(h)
-      if (key) existingMonthKeys.add(key)
+      if (key) {
+        existingMonthKeys.add(key)
+        existingMonthList.push(key)
+      }
     })
 
-    const missing = monthKeys.filter(k => !existingMonthKeys.has(k))
+    let missing = []
+    if (existingMonthList.length) {
+      const maxExisting = existingMonthList.reduce((a, b) => (a > b ? a : b))
+      if (existingMonthKeys.has(currentMonthKey)) {
+        const monthsAfterMax = PAYING_monthRange_(PAYING_addMonths_(maxExisting, 1), endMonthKey)
+        missing = monthsAfterMax.filter(k => !existingMonthKeys.has(k))
+      } else {
+        const ensureKeys = PAYING_monthRange_(currentMonthKey, endMonthKey)
+        missing = ensureKeys.filter(k => !existingMonthKeys.has(k))
+      }
+    } else {
+      missing = PAYING_monthRange_(currentMonthKey, endMonthKey)
+    }
+
     if (missing.length) {
       const labels = missing.map(k => PAYING_monthLabelFromKey_(k))
-      sh.getRange(PAYING_CFG.HEADER_ROW, lastCol + 1, 1, labels.length).setValues([labels])
+      sh.getRange(headerRow, lastCol + 1, 1, labels.length).setValues([labels])
       lastCol += labels.length
     }
   }
@@ -226,14 +245,14 @@ function PAYING_renderSnapshot_(opts) {
   const monthCol = lastCol
 
   const rowMap = new Map()
-  if (lastRow >= PAYING_CFG.DATA_START_ROW) {
-    const numRows = lastRow - PAYING_CFG.HEADER_ROW
+  if (lastRow >= dataStartRow) {
+    const numRows = lastRow - headerRow
     const idValues = sh
-      .getRange(PAYING_CFG.DATA_START_ROW, idCol, numRows, 1)
+      .getRange(dataStartRow, idCol, numRows, 1)
       .getValues()
     idValues.forEach((r, idx) => {
       const id = String(r[0] || '').trim()
-      if (id) rowMap.set(id, PAYING_CFG.DATA_START_ROW + idx)
+      if (id) rowMap.set(id, dataStartRow + idx)
     })
   }
 
@@ -253,22 +272,22 @@ function PAYING_renderSnapshot_(opts) {
     lastRow += newRows.length
   }
 
-  if (lastRow >= PAYING_CFG.DATA_START_ROW) {
-    const numRows = lastRow - PAYING_CFG.HEADER_ROW
-    const nameValues = sh.getRange(PAYING_CFG.DATA_START_ROW, nameCol, numRows, 1).getValues()
-    const emailValues = sh.getRange(PAYING_CFG.DATA_START_ROW, emailCol, numRows, 1).getValues()
+  if (lastRow >= dataStartRow) {
+    const numRows = lastRow - headerRow
+    const nameValues = sh.getRange(dataStartRow, nameCol, numRows, 1).getValues()
+    const emailValues = sh.getRange(dataStartRow, emailCol, numRows, 1).getValues()
 
-    const headerRow = sh
-      .getRange(PAYING_CFG.HEADER_ROW, 1, 1, lastCol)
+    const headerValues = sh
+      .getRange(headerRow, 1, 1, lastCol)
       .getValues()[0]
 
-    const headerMonthKeys = headerRow.slice(3).map(h => PAYING_monthKeyFromHeader_(h))
-    const monthValues = sh.getRange(PAYING_CFG.DATA_START_ROW, 4, numRows, headerMonthKeys.length).getValues()
+    const headerMonthKeys = headerValues.slice(3).map(h => PAYING_monthKeyFromHeader_(h))
+    const monthValues = sh.getRange(dataStartRow, 4, numRows, headerMonthKeys.length).getValues()
 
     orgMonthData.forEach((v, orgId) => {
       const rowIdx = rowMap.get(orgId)
       if (!rowIdx) return
-      const offset = rowIdx - PAYING_CFG.DATA_START_ROW
+      const offset = rowIdx - dataStartRow
       if (offset < 0 || offset >= numRows) return
       if (v.org_name) nameValues[offset][0] = v.org_name
       if (v.org_email) emailValues[offset][0] = v.org_email
@@ -286,7 +305,7 @@ function PAYING_renderSnapshot_(opts) {
     orgNoActive.forEach((v, orgId) => {
       const rowIdx = rowMap.get(orgId)
       if (!rowIdx) return
-      const offset = rowIdx - PAYING_CFG.DATA_START_ROW
+      const offset = rowIdx - dataStartRow
       if (offset < 0 || offset >= numRows) return
       if (v.org_name) nameValues[offset][0] = v.org_name
       if (v.org_email) emailValues[offset][0] = v.org_email
@@ -299,15 +318,16 @@ function PAYING_renderSnapshot_(opts) {
       }
     })
 
-    sh.getRange(PAYING_CFG.DATA_START_ROW, nameCol, numRows, 1).setValues(nameValues)
-    sh.getRange(PAYING_CFG.DATA_START_ROW, emailCol, numRows, 1).setValues(emailValues)
-    sh.getRange(PAYING_CFG.DATA_START_ROW, 4, numRows, headerMonthKeys.length).setValues(monthValues)
-    sh.getRange(PAYING_CFG.DATA_START_ROW, 4, numRows, headerMonthKeys.length).setNumberFormat('0')
+    sh.getRange(dataStartRow, nameCol, numRows, 1).setValues(nameValues)
+    sh.getRange(dataStartRow, emailCol, numRows, 1).setValues(emailValues)
+    sh.getRange(dataStartRow, 4, numRows, headerMonthKeys.length).setValues(monthValues)
+    sh.getRange(dataStartRow, 4, numRows, headerMonthKeys.length).setNumberFormat('0')
   }
 
   sh.setFrozenColumns(3)
+  sh.setFrozenRows(headerRow)
   sh.autoResizeColumns(1, Math.min(lastCol, 6))
-  PAYING_applySummaryFormulas_(sh, lastCol)
+  PAYING_applySummaryFormulas_(sh, lastCol, dataStartRow)
 
   const seconds = (new Date() - t0) / 1000
   if (typeof writeSyncLog === 'function') {
@@ -395,7 +415,19 @@ function PAYING_ensureSummaryLayout_(sheet) {
   sheet.getRange(blankRow, 1, 1, 1).setValue('')
 }
 
-function PAYING_applySummaryFormulas_(sheet, lastCol) {
+function PAYING_findHeaderRow_(sheet) {
+  const scanRows = Math.min(50, Math.max(sheet.getLastRow(), PAYING_CFG.HEADER_ROW))
+  if (scanRows <= 0) return PAYING_CFG.HEADER_ROW
+
+  const colA = sheet.getRange(1, 1, scanRows, 1).getValues()
+  for (let i = 0; i < colA.length; i++) {
+    const v = String(colA[i][0] || '').trim().toLowerCase()
+    if (v === PAYING_CFG.ID_HEADER.toLowerCase()) return i + 1
+  }
+  return PAYING_CFG.HEADER_ROW
+}
+
+function PAYING_applySummaryFormulas_(sheet, lastCol, dataStartRow) {
   const startCol = 4
   const numCols = lastCol - startCol + 1
   if (numCols <= 0) return
@@ -408,7 +440,8 @@ function PAYING_applySummaryFormulas_(sheet, lastCol) {
     const existingValue = cell.getValue()
     if (!existingFormula && (existingValue === '' || existingValue === null)) {
       const colLetter = PAYING_colLetter_(col)
-      cell.setFormula(`=SUM(${colLetter}${PAYING_CFG.DATA_START_ROW}:${colLetter})`)
+      const startRow = dataStartRow || PAYING_CFG.DATA_START_ROW
+      cell.setFormula(`=SUM(${colLetter}${startRow}:${colLetter})`)
     }
   }
 
@@ -487,10 +520,10 @@ function PAYING_buildUsersByEmailKey_(users) {
   return out
 }
 
-function PAYING_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {
+function PAYING_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users) {
   const out = new Map()
   membershipsByOrgId.forEach((members, orgId) => {
-    const set = new Set()
+    const set = out.get(orgId) || new Set()
     ;(members || []).forEach(m => {
       const key = PAYING_normEmail_(m.email_key || m.email)
       if (!key) return
@@ -498,6 +531,14 @@ function PAYING_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {
       const subId = PAYING_str_(u && (u.stripe_subscription_id || u.stripeSubscriptionId))
       if (subId) set.add(subId)
     })
+    out.set(orgId, set)
+  })
+  ;(users || []).forEach(u => {
+    const orgId = PAYING_str_(u.org_id)
+    const subId = PAYING_str_(u && (u.stripe_subscription_id || u.stripeSubscriptionId))
+    if (!orgId || !subId) return
+    const set = out.get(orgId) || new Set()
+    set.add(subId)
     out.set(orgId, set)
   })
   return out
@@ -551,9 +592,8 @@ function PAYING_monthLabel_(d, fmt) {
 
 function PAYING_monthKeyFromDate_(d) {
   if (!(d instanceof Date) || isNaN(d.getTime())) return ''
-  const y = d.getUTCFullYear()
-  const m = String(d.getUTCMonth() + 1).padStart(2, '0')
-  return `${y}-${m}`
+  const tz = Session.getScriptTimeZone()
+  return Utilities.formatDate(d, tz, 'yyyy-MM')
 }
 
 function PAYING_monthKeyFromIso_(iso) {
@@ -564,13 +604,15 @@ function PAYING_monthKeyFromIso_(iso) {
 function PAYING_monthLabelFromKey_(key) {
   const info = PAYING_parseMonthKey_(key)
   if (!info) return ''
-  const d = new Date(Date.UTC(info.y, info.m - 1, 1))
-  return PAYING_monthLabel_(d, PAYING_CFG.MONTH_FMT)
+  return `${PAYING_monthAbbrev_(info.m)}-${info.y}`
 }
 
 function PAYING_monthKeyFromHeader_(v) {
   if (!v) return ''
-  if (v instanceof Date && !isNaN(v.getTime())) return PAYING_monthKeyFromDate_(v)
+  if (v instanceof Date && !isNaN(v.getTime())) {
+    const tz = Session.getScriptTimeZone()
+    return Utilities.formatDate(v, tz, 'yyyy-MM')
+  }
 
   const s = String(v || '').trim()
   if (!s) return ''
@@ -674,4 +716,13 @@ function PAYING_monthNumFromAbbrev_(abbr) {
     jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12
   }
   return map[s] || 0
+}
+
+function PAYING_monthAbbrev_(monthNum) {
+  const map = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'
+  ]
+  const idx = Number(monthNum) - 1
+  return map[idx] || ''
 }

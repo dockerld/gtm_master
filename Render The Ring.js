@@ -274,7 +274,7 @@ function buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs) {
   // stripe_subscription_id -> list of users
   const usersByStripeSubId = new Map()
   for (const u of (clerkUsers || [])) {
-    const subId = str_(u.stripe_subscription_id)
+    const subId = str_(u.stripe_subscription_id || u.stripeSubscriptionId)
     if (!subId) continue
 
     const email = str_(u.email)
@@ -282,9 +282,10 @@ function buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs) {
     if (!emailKey) continue
 
     const name = str_(u.name)
+    const orgId = str_(u.org_id)
 
     if (!usersByStripeSubId.has(subId)) usersByStripeSubId.set(subId, [])
-    usersByStripeSubId.get(subId).push({ email, emailKey, name })
+    usersByStripeSubId.get(subId).push({ email, emailKey, name, orgId })
   }
 
   return {
@@ -330,6 +331,7 @@ function resolveRingCustomer_(stripeEmailKey, stripeSubscriptionId, idx) {
     const ownerish = mems.find(m => m.isOwnerish)
     orgId = (ownerish ? ownerish.orgId : mems[0].orgId) || ''
   }
+  if (!orgId && picked.orgId) orgId = picked.orgId
 
   const orgName = orgId ? (idx.orgNameByOrgId.get(orgId) || '') : ''
 

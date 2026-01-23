@@ -90,7 +90,7 @@ function render_arr_raw_data_view() {
     const orgInfoById = ARR_buildOrgInfoById_(orgInfo)
 
     // orgId -> Set(subIds) from memberships -> users -> stripe_subscription_id
-    const subIdsByOrgId = ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey)
+    const subIdsByOrgId = ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users)
 
     // orgId -> derived subscription rollup (earliest purchase, current status, etc.)
     const subRollupByOrgId = ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId)
@@ -467,11 +467,11 @@ function ARR_rowsFromSubIds_(subIdSet, stripeBySubId) {
   return rows
 }
 
-function ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {
+function ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users) {
   const out = new Map()
 
   membershipsByOrgId.forEach((members, orgId) => {
-    const set = new Set()
+    const set = out.get(orgId) || new Set()
     ;(members || []).forEach(m => {
       const key = ARR_normEmail_(m.email_key || m.email)
       if (!key) return
@@ -479,6 +479,15 @@ function ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey) {
       const subId = u ? ARR_str_(u.stripe_subscription_id || u.stripeSubscriptionId) : ""
       if (subId) set.add(subId)
     })
+    out.set(orgId, set)
+  })
+
+  ;(users || []).forEach(u => {
+    const orgId = ARR_str_(u.org_id)
+    const subId = ARR_str_(u.stripe_subscription_id || u.stripeSubscriptionId)
+    if (!orgId || !subId) return
+    const set = out.get(orgId) || new Set()
+    set.add(subId)
     out.set(orgId, set)
   })
 

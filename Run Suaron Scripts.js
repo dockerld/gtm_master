@@ -49,8 +49,7 @@ function run_daily_pipeline() {
       { name: 'render_sauron_view',              fn: render_sauron_view },
       { name: 'render_ring_view',                fn: render_ring_view },
 
-      { name: 'render_onboarding_stats',         fn: render_onboarding_stats },
-      { name: 'render_org_conversion_stats',     fn: render_org_conversion_stats }
+      { name: 'render_conversion_onboarding_stats', fn: render_conversion_onboarding_stats }
     ]
 
     for (const step of steps) {
