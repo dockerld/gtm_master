@@ -44,6 +44,8 @@ const SAURON_CFG = {
     'Days since last Login',
     'Meetings Recorded',
     'Hours Recorded',
+    'Meeting Notes Synced',
+    'Action Items Synced',
     'Logged in #',
     'Active Days (PostHog)',
     '# of Seats',
@@ -65,6 +67,8 @@ const SAURON_CFG = {
     'Cal Connected Date',
     'Email Connected',
     'Email Connected Date',
+    'Meeting Notes Synced',
+    'Action Items Synced',
     'Hierarchy',
     'Consierge Email',
     'Tags',
@@ -178,7 +182,7 @@ function render_sauron_view() {
         orgById.set(orgId, o)
       })
 
-      const payingByEmailKey = SAURON_buildPayingIndex_(shClerkUsersRaw)
+      const payingIndex = SAURON_buildPayingIndex_(shClerkUsersRaw, shMems)
       const activeDaysByEmailKey = SAURON_buildActiveDaysIndex_(shPosthogUsersRaw)
 
       // ✅ org-level Service index (Org ID -> Service)
@@ -289,12 +293,17 @@ function render_sauron_view() {
         const note = SAURON_pickManualOrDefault_(priorManual, 'Note', '')
         const handsOn = SAURON_pickManualOrDefault_(priorManual, 'Hands On', '')
         const tests = SAURON_pickManualOrDefault_(priorManual, 'Tests', '')
-        const hierarchy = SAURON_pickManualOrDefault_(priorManual, 'Hierarchy', '')
+        const roleRaw = String(u.org_role || '').trim()
+        const roleClean = SAURON_normalizeRole_(roleRaw)
+        const hierarchy = SAURON_pickManualOrDefaultNonEmpty_(priorManual, 'Hierarchy', roleClean)
         const consiergeEmail = SAURON_pickManualOrDefault_(priorManual, 'Consierge Email', '')
         const tags = SAURON_pickManualOrDefault_(priorManual, 'Tags', '')
         const status = SAURON_pickManualOrDefault_(priorManual, 'Status', '')
 
-        const paying = SAURON_toBool_(payingByEmailKey.get(emailKey) === true)
+        const paying = SAURON_toBool_(
+          (orgId && payingIndex.byOrgId.get(orgId) === true) ||
+          payingIndex.byEmailKey.get(emailKey) === true
+        )
 
         const seats = (org.seats != null && org.seats !== '') ? org.seats : ''
         const promo = String(org.promo_code || '').trim()
@@ -302,6 +311,8 @@ function render_sauron_view() {
         const clientsCount = (u.clients_count != null) ? u.clients_count : ''
         const meetingsRecorded = (u.meetings_recorded != null) ? u.meetings_recorded : ''
         const hoursRecorded = (u.hours_recorded != null) ? u.hours_recorded : ''
+        const meetingNotesSynced = (u.meeting_notes_synced != null) ? u.meeting_notes_synced : ''
+        const actionItemsSynced = (u.action_items_synced != null) ? u.action_items_synced : ''
         const askMeeting = (u.ask_meeting != null) ? u.ask_meeting : ''
         const askGlobal = (u.ask_global != null) ? u.ask_global : ''
         const clientViews = (u.client_page_views != null) ? u.client_page_views : ''
@@ -328,6 +339,8 @@ function render_sauron_view() {
           'Days since last Login': daysSinceLastLogin,
           'Meetings Recorded': meetingsRecorded,
           'Hours Recorded': hoursRecorded,
+          'Meeting Notes Synced': meetingNotesSynced,
+          'Action Items Synced': actionItemsSynced,
           'Logged in #': loggedInDays,
           'Active Days (PostHog)': activeDaysPosthog,
           '# of Seats': seats,
@@ -560,6 +573,21 @@ function SAURON_pickManualOrDefault_(priorManual, headerName, fallback) {
   return fallback
 }
 
+function SAURON_pickManualOrDefaultNonEmpty_(priorManual, headerName, fallback) {
+  if (priorManual && Object.prototype.hasOwnProperty.call(priorManual, headerName)) {
+    const v = priorManual[headerName]
+    if (v != null && String(v).trim() !== '') return v
+  }
+  return fallback
+}
+
+function SAURON_normalizeRole_(role) {
+  const s = String(role || '').trim()
+  if (!s) return ''
+  const idx = s.lastIndexOf(':')
+  return idx >= 0 ? s.slice(idx + 1).trim() : s
+}
+
 function SAURON_asYMD_(value, tz) {
   if (!value) return ''
   if (value instanceof Date) return Utilities.formatDate(value, tz, 'yyyy-MM-dd')
@@ -673,15 +701,17 @@ function SAURON_activationMissing_(row) {
   return missing.join(', ')
 }
 
-function SAURON_buildPayingIndex_(rawClerkUsersSheet) {
+function SAURON_buildPayingIndex_(rawClerkUsersSheet, rawClerkMembershipsSheet) {
   const lastRow = rawClerkUsersSheet.getLastRow()
   const lastCol = rawClerkUsersSheet.getLastColumn()
-  const out = new Map()
-  if (lastRow < 2) return out
+  const byEmailKey = new Map()
+  const byOrgId = new Map()
+  if (lastRow < 2) return { byEmailKey, byOrgId }
 
   const { map } = readHeaderMap(rawClerkUsersSheet, 1)
   const cEmailKey = map['email_key']
   const cStripeSub = map['stripe_subscription_id']
+  const cOrgId = map['org_id']
 
   if (!cEmailKey || !cStripeSub) {
     throw new Error('raw_clerk_users must have headers: email_key, stripe_subscription_id')
@@ -691,11 +721,38 @@ function SAURON_buildPayingIndex_(rawClerkUsersSheet) {
   data.forEach(r => {
     const emailKey = String(r[cEmailKey - 1] || '').trim()
     const stripeSub = String(r[cStripeSub - 1] || '').trim()
+    const orgId = cOrgId ? String(r[cOrgId - 1] || '').trim() : ''
+    const hasSub = !!stripeSub
     if (!emailKey) return
-    out.set(emailKey, !!stripeSub)
+    byEmailKey.set(emailKey, hasSub)
+    if (orgId && hasSub) byOrgId.set(orgId, true)
   })
 
-  return out
+  // If memberships are available, map org -> paying via member email_key
+  if (rawClerkMembershipsSheet) {
+    const memLastRow = rawClerkMembershipsSheet.getLastRow()
+    const memLastCol = rawClerkMembershipsSheet.getLastColumn()
+    if (memLastRow >= 2) {
+      const { map: memMap } = readHeaderMap(rawClerkMembershipsSheet, 1)
+      const cMemOrgId = memMap['org_id']
+      const cMemEmailKey = memMap['email_key']
+      const cMemEmail = memMap['email']
+      if (cMemOrgId && (cMemEmailKey || cMemEmail)) {
+        const memData = rawClerkMembershipsSheet.getRange(2, 1, memLastRow - 1, memLastCol).getValues()
+        memData.forEach(r => {
+          const orgId = String(r[cMemOrgId - 1] || '').trim()
+          if (!orgId) return
+          let emailKey = ''
+          if (cMemEmailKey) emailKey = String(r[cMemEmailKey - 1] || '').trim()
+          if (!emailKey && cMemEmail) emailKey = SAURON_normEmail_(String(r[cMemEmail - 1] || '').trim())
+          if (!emailKey) return
+          if (byEmailKey.get(emailKey) === true) byOrgId.set(orgId, true)
+        })
+      }
+    }
+  }
+
+  return { byEmailKey, byOrgId }
 }
 
 function SAURON_buildActiveDaysIndex_(rawPosthogSheet) {

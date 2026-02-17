@@ -21,6 +21,14 @@ const RING_WEEKLY_CFG = {
 }
 
 function send_ring_weekly_email() {
+  return send_ring_weekly_email_to_(RING_WEEKLY_CFG.RECIPIENTS)
+}
+
+function send_ring_weekly_email_test_docker() {
+  return send_ring_weekly_email_to_(['docker@pingassistant.com'])
+}
+
+function send_ring_weekly_email_to_(recipients) {
   const ss = SpreadsheetApp.getActive()
   const sh = ss.getSheetByName(RING_WEEKLY_CFG.SHEET_NAME)
   if (!sh) throw new Error('Missing "The Ring" sheet')
@@ -32,11 +40,13 @@ function send_ring_weekly_email() {
   const html = buildRingWeeklyHtml_(arr, subs, seats)
 
   GmailApp.sendEmail(
-    RING_WEEKLY_CFG.RECIPIENTS.join(','),
+    recipients.join(','),
     RING_WEEKLY_CFG.SUBJECT,
     'Your email client does not support HTML.',
     { htmlBody: html }
   )
+
+  return { recipients: recipients.length }
 }
 
 /* ============================================================
@@ -51,32 +61,36 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
     ink:    '#2F2B27'
   }
 
-  const RING_URL = 'https://docs.google.com/spreadsheets/d/1ZY8tZgVdb1gg74FGF6izkS-7EcO5PCrl0ujxZsFOEKo/edit?gid=265600447#gid=265600447'
+  const RING_URL = 'https://docs.google.com/spreadsheets/d/147yUcx8Eb7LE-jhAALwfmddIIOoBYcvEJpXhJR0c8qc/edit?gid=1300412141#gid=1300412141'
 
   const today = new Date()
   const dateStr = Utilities.formatDate(today, Session.getScriptTimeZone(), 'EEE, MMM d, yyyy')
 
   // Goals
-  const monthlyGoalArr = getMonthlyArrGoalFromGoalsSheet_() // from Goals row 2 for current month
+  const goalsMonth = getMonthlyGoalAndQuotaFromGoalsSheet_()
+  const monthlyGoalArr = goalsMonth.goalArr
+  const monthlyQuotaArr = goalsMonth.quotaArr
   const annualGoalArr = 1000000
 
   // Percent helpers
   const monthlyPct = clamp01_(monthlyGoalArr > 0 ? (arr / monthlyGoalArr) : 0)
   const annualPct = clamp01_(annualGoalArr > 0 ? (arr / annualGoalArr) : 0)
+  const quotaPctOfGoal = clamp01_(monthlyGoalArr > 0 ? (monthlyQuotaArr / monthlyGoalArr) : 0)
 
   const monthlyGoalPctText = fmtPct_(monthlyPct)
   const annualGoalPctText = fmtPct_(annualPct)
 
-  const monthlyGoalPctWidth = fmtPctWidth_(monthlyPct)
   const annualGoalPctWidth = fmtPctWidth_(annualPct)
 
   // Format values
   const arrValue = fmtMoney_(arr)
   const monthlyGoalValue = fmtMoney_(monthlyGoalArr)
+  const monthlyQuotaValue = fmtMoney_(monthlyQuotaArr)
   const annualGoalValue = fmtMoney_(annualGoalArr)
 
   const subscriptions = String(subs ?? '')
   const totalSeats = String(seats ?? '')
+  const monthlyBarHtml = buildMonthlyBarWithQuotaMarkerHtml_(monthlyPct, quotaPctOfGoal, COLORS)
 
   return `<!DOCTYPE html>
 <html>
@@ -100,12 +114,12 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
                   </div>
 
                   <div style="font-size:28px;font-weight:900;">Your Biweekly Update</div>
-                  <div style="margin-top:6px;font-size:13px;opacity:0.65;">{{date}}</div>
+                  <div style="margin-top:6px;font-size:13px;opacity:0.65;">${escapeHtml_(dateStr)}</div>
                 </td>
 
                 <!-- Right: button -->
                 <td align="right" valign="top">
-                  <a href="{{ring_url}}" target="_blank" style="text-decoration:none;">
+                  <a href="${escapeHtml_(RING_URL)}" target="_blank" style="text-decoration:none;">
                     <span style="
                       display:inline-block;
                       background:linear-gradient(90deg,#8F88F9,#FB923C);
@@ -137,13 +151,15 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
               </div>
               <div style="text-align:right;font-size:12px;opacity:0.7;white-space:nowrap;">
                 <div style="font-weight:800;">Monthly goal: ${escapeHtml_(monthlyGoalValue)}</div>
+                <div style="font-weight:800;">Quota: ${escapeHtml_(monthlyQuotaValue)}</div>
                 <div>${escapeHtml_(monthlyGoalPctText)} to goal</div>
               </div>
             </div>
 
-            <div style="margin-top:16px;height:10px;background:rgba(47,43,39,0.10);border-radius:999px;overflow:hidden;">
-              <div style="width:${escapeHtml_(monthlyGoalPctWidth)};height:100%;background:linear-gradient(90deg,${COLORS.orange},${COLORS.purple});"></div>
+            <div style="margin-top:16px;">
+              ${monthlyBarHtml}
             </div>
+            <div style="margin-top:6px;font-size:11px;opacity:0.75;">Quota marker shown as vertical line.</div>
           </div>
 
           <!-- Subs + Seats (email-safe table layout) -->
@@ -204,49 +220,75 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
 }
 
 /* =========================
- * Goals: read current month ARR goal from "Goals" sheet row 2
- * Assumes month headers are in row 1 (e.g. "Dec-2025") and ARR values in row 2
+ * Goals reader:
+ * - Goal section: month headers in row 12, ARR values in row 13
+ * - Quota section: month headers in row 6, ARR values in row 7
+ * - Legacy fallback: row 1/2
  * ========================= */
 
 function getMonthlyArrGoalFromGoalsSheet_() {
+  return getMonthlyGoalAndQuotaFromGoalsSheet_().goalArr
+}
+
+function getMonthlyGoalAndQuotaFromGoalsSheet_() {
   const ss = SpreadsheetApp.getActive()
   const sh = ss.getSheetByName('Goals')
-  if (!sh) return 0
+  if (!sh) return { goalArr: 0, quotaArr: 0, monthKey: '' }
 
   const lastCol = sh.getLastColumn()
-  if (lastCol < 2) return 0
-
-  const headers = sh.getRange(1, 1, 1, lastCol).getDisplayValues()[0] // use display text
-  const arrRow = sh.getRange(2, 1, 1, lastCol).getValues()[0]
+  if (lastCol < 2) return { goalArr: 0, quotaArr: 0, monthKey: '' }
 
   const tz = Session.getScriptTimeZone()
   const thisMonthKey = Utilities.formatDate(new Date(), tz, 'MMM-yyyy') // "Dec-2025"
 
-  // Find the current month column
+  // New layout: Goal section (rows 12/13), Quota section (rows 6/7)
+  let goalArr = findMonthValueInRowPair_(sh, 12, 13, thisMonthKey)
+  const quotaArr = findMonthValueInRowPair_(sh, 6, 7, thisMonthKey)
+
+  // Legacy fallback (rows 1/2) for older sheets
+  if (!(goalArr > 0)) {
+    goalArr = findMonthValueInRowPair_(sh, 1, 2, thisMonthKey)
+  }
+
+  if (!(goalArr > 0)) {
+    // Last-resort fallback: latest positive value from Goal ARR row (row 13)
+    const goalRow = sh.getRange(13, 1, 1, lastCol).getValues()[0]
+    goalArr = findLatestPositive_(goalRow)
+  }
+
+  return {
+    goalArr: isFinite(goalArr) ? Number(goalArr) : 0,
+    quotaArr: isFinite(quotaArr) ? Number(quotaArr) : 0,
+    monthKey: thisMonthKey
+  }
+}
+
+function findMonthValueInRowPair_(sheet, headerRowNumber, valueRowNumber, monthKey) {
+  const lastCol = sheet.getLastColumn()
+  if (lastCol < 1) return 0
+
+  const headers = sheet.getRange(headerRowNumber, 1, 1, lastCol).getDisplayValues()[0]
+  const values = sheet.getRange(valueRowNumber, 1, 1, lastCol).getValues()[0]
+
   let idx = -1
   for (let i = 0; i < headers.length; i++) {
-    const h = String(headers[i] || '').trim()
-    if (h === thisMonthKey) {
+    if (String(headers[i] || '').trim() === String(monthKey || '').trim()) {
       idx = i
       break
     }
   }
 
-  // If not found, fallback to last numeric goal in row 2
-  if (idx === -1) {
-    for (let c = lastCol - 1; c >= 1; c--) {
-      const v = Number(arrRow[c])
-      if (isFinite(v) && v > 0) {
-        idx = c
-        break
-      }
-    }
-  }
-
-  if (idx === -1) return 0
-
-  const n = Number(arrRow[idx])
+  if (idx < 0) return 0
+  const n = Number(values[idx])
   return isFinite(n) ? n : 0
+}
+
+function findLatestPositive_(rowValues) {
+  for (let i = rowValues.length - 1; i >= 0; i--) {
+    const n = Number(rowValues[i])
+    if (isFinite(n) && n > 0) return n
+  }
+  return 0
 }
 
 /* =========================
@@ -274,6 +316,62 @@ function clamp01_(n) {
   const x = Number(n)
   if (!isFinite(x)) return 0
   return Math.max(0, Math.min(1, x))
+}
+
+function buildMonthlyBarWithQuotaMarkerHtml_(fillPct01, markerPct01, colors) {
+  const fillPct = GOOD_safePct_(fillPct01)
+  const markerPct = GOOD_safePct_(markerPct01)
+  const trackColor = '#D9D7D3'
+  const fillColor = colors.purple
+  const markerColor = colors.ink
+
+  // Keep this visibly thick in strict email clients.
+  const markerWidthPct = 1.8
+
+  const leftOfMarker = Math.max(0, markerPct - markerWidthPct / 2)
+  const rightOfMarker = Math.min(100, markerPct + markerWidthPct / 2)
+
+  let cells = []
+  if (fillPct <= leftOfMarker) {
+    // Fill ends before marker
+    cells = [
+      { w: fillPct, bg: fillColor },
+      { w: leftOfMarker - fillPct, bg: trackColor },
+      { w: rightOfMarker - leftOfMarker, bg: markerColor },
+      { w: 100 - rightOfMarker, bg: trackColor }
+    ]
+  } else if (fillPct <= rightOfMarker) {
+    // Fill overlaps marker
+    cells = [
+      { w: leftOfMarker, bg: fillColor },
+      { w: rightOfMarker - leftOfMarker, bg: markerColor },
+      { w: 100 - rightOfMarker, bg: trackColor }
+    ]
+  } else {
+    // Fill extends past marker
+    cells = [
+      { w: leftOfMarker, bg: fillColor },
+      { w: rightOfMarker - leftOfMarker, bg: markerColor },
+      { w: fillPct - rightOfMarker, bg: fillColor },
+      { w: 100 - fillPct, bg: trackColor }
+    ]
+  }
+
+  const cellsHtml = cells
+    .filter(c => c.w > 0.01)
+    .map(c => {
+      const w = c.w.toFixed(3)
+      return `<td width="${escapeHtml_(w)}%" style="padding:0;margin:0;height:10px;width:${escapeHtml_(w)}%;font-size:0;line-height:0;background:${escapeHtml_(c.bg)};">&nbsp;</td>`
+    })
+    .join('')
+
+  return `<table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="table-layout:fixed;border-collapse:collapse;background:${trackColor};border-radius:999px;overflow:hidden;"><tr>${cellsHtml}</tr></table>`
+}
+
+function GOOD_safePct_(v) {
+  const n = Number(v)
+  if (!isFinite(n)) return 0
+  return Math.max(0, Math.min(100, n * 100))
 }
 
 function escapeHtml_(s) {

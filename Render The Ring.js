@@ -120,6 +120,7 @@ const RING_CFG = {
 const RING_EXCLUDED_REASON_TERMS = ['internal', 'testing', 'duplicate']
 const RING_FREE_SEAT_MONTHLY_DISCOUNT = 30
 const RING_FREE_SEAT_YEARLY_DISCOUNT = 288
+const RING_AUTO_PUBLISH_GOOD_STUFF = true
 
 function render_ring_view() {
   lockWrapCompat_('render_ring_view', () => {
@@ -297,6 +298,23 @@ function render_ring_view() {
         (new Date() - t0) / 1000,
         ''
       )
+
+      // Best effort: publish external dashboard after a successful Ring render.
+      // Do not fail Ring if publish encounters an external permission/network issue.
+      if (RING_AUTO_PUBLISH_GOOD_STUFF && typeof publish_the_good_stuff === 'function') {
+        try {
+          publish_the_good_stuff()
+        } catch (pubErr) {
+          writeSyncLogCompat_(
+            'publish_the_good_stuff (auto)',
+            'error',
+            '',
+            '',
+            '',
+            String(pubErr && pubErr.message ? pubErr.message : pubErr)
+          )
+        }
+      }
 
       return { rows_in: rows.length, rows_out: out.length }
     } catch (err) {

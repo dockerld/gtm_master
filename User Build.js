@@ -71,6 +71,8 @@ function build_canon_users() {
           'client_page_views',
           'clients_count',
           'active_days',
+          'action_items_synced',
+          'meeting_notes_synced',
 
           'calendar_connected',
           'first_calendar_connected_date',
@@ -372,6 +374,8 @@ function build_canon_users() {
           client_page_views: 0,
           clients_count: 0,
           active_days: 0,
+          action_items_synced: 0,
+          meeting_notes_synced: 0,
 
           calendar_connected: false,
           first_calendar_connected_date: '',
@@ -408,6 +412,8 @@ function build_canon_users() {
             client_page_views: num_(metricsTbl, r, 'client_page_views'),
             clients_count: num_(metricsTbl, r, 'clients_count'),
             active_days: num_(metricsTbl, r, 'active_days'),
+            action_items_synced: num_(metricsTbl, r, 'action_items_synced'),
+            meeting_notes_synced: num_(metricsTbl, r, 'meeting_notes_synced'),
 
             calendar_connected: bool_(metricsTbl, r, 'calendar_connected'),
             first_calendar_connected_date: str_(metricsTbl, r, 'first_calendar_connected_date'),
@@ -649,6 +655,8 @@ function build_canon_users() {
           m.client_page_views,
           m.clients_count,
           m.active_days,
+          m.action_items_synced,
+          m.meeting_notes_synced,
 
           m.calendar_connected,
           m.first_calendar_connected_date,

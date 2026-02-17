@@ -46,11 +46,14 @@ function onOpen() {
     .addItem('Run only Stripe', 'ui_run_only_stripe')
     .addItem('Run only Clerk', 'ui_run_only_clerk')
     .addItem('Run The Ring only', 'ui_run_only_ring')
+    .addItem('Render All the Stats', 'ui_render_all_stats')
     .addItem('Publish The Good Stuff', 'ui_publish_the_good_stuff')
+    .addItem('Send Ring Weekly Test (Docker)', 'ui_send_ring_weekly_test_docker')
     .addSeparator()
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
+    .addItem('Build Promo Backfill (One-time)', 'ui_build_promo_backfill')
     .addItem('Run Conversion & Onboarding stats', 'ui_run_conversion_onboarding_stats')
     .addItem('Run Conversion audit', 'ui_run_conversion_audit')
     .addSeparator()
@@ -114,10 +117,26 @@ function ui_run_only_ring() {
   })
 }
 
+function ui_render_all_stats() {
+  return uiRunWrapped_('ui_render_all_stats', () => {
+    runSteps_([
+      { name: 'render_all_stats_view', fn: render_all_stats_view }
+    ])
+  })
+}
+
 function ui_publish_the_good_stuff() {
   return uiRunWrapped_('ui_publish_the_good_stuff', () => {
     runSteps_([
       { name: 'publish_the_good_stuff', fn: publish_the_good_stuff }
+    ])
+  })
+}
+
+function ui_send_ring_weekly_test_docker() {
+  return uiRunWrapped_('ui_send_ring_weekly_test_docker', () => {
+    runSteps_([
+      { name: 'send_ring_weekly_email_test_docker', fn: send_ring_weekly_email_test_docker }
     ])
   })
 }
@@ -140,6 +159,14 @@ function ui_run_arr_refresh() {
       { name: 'render_arr_raw_data_view', fn: render_arr_raw_data_view },
       { name: 'write_arr_snapshot', fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts', fn: render_arr_waterfall_facts }
+    ])
+  })
+}
+
+function ui_build_promo_backfill() {
+  return uiRunWrapped_('ui_build_promo_backfill', () => {
+    runSteps_([
+      { name: 'render_promo_redemptions_backfill', fn: render_promo_redemptions_backfill }
     ])
   })
 }

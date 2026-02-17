@@ -156,9 +156,8 @@ function GOOD_resetAndStyleCanvas_(sheet) {
   sheet.clear()
   try { sheet.setHiddenGridlines(true) } catch (e) {}
 
-  const widths = [190, 190, 190, 190, 16, 190, 190, 190, 16, 190, 190, 190]
-  for (let i = 0; i < widths.length; i++) {
-    sheet.setColumnWidth(i + 1, widths[i])
+  for (let i = 1; i <= 12; i++) {
+    sheet.setColumnWidth(i, 180)
   }
 }
 
@@ -171,8 +170,8 @@ function GOOD_writeHeader_(sheet) {
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
     .setVerticalAlignment('middle')
-    .setBackground('#0F172A')
-    .setFontColor('#FFFFFF')
+    .setBackground('#FFFFFF')
+    .setFontColor('#111111')
 
   const tz = Session.getScriptTimeZone()
   const stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss')
@@ -183,8 +182,8 @@ function GOOD_writeHeader_(sheet) {
     .setFontSize(11)
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
-    .setBackground('#E2E8F0')
-    .setFontColor('#334155')
+    .setBackground('#FFFFFF')
+    .setFontColor('#374151')
 
   sheet.setRowHeight(1, 42)
   sheet.setRowHeight(2, 24)
@@ -203,7 +202,7 @@ function GOOD_writeGoalStrip_(sheet, goals) {
       .setValue(labels[i])
       .setFontWeight('bold')
       .setHorizontalAlignment('center')
-      .setBackground('#1E293B')
+      .setBackground('#3B82F6')
       .setFontColor('#F8FAFC')
 
     const valueR = sheet.getRange(10, c, 1, 4)
@@ -226,23 +225,23 @@ function GOOD_writeGoalStrip_(sheet, goals) {
     )
     .setHorizontalAlignment('center')
     .setFontWeight('bold')
-    .setBackground('#DBEAFE')
-    .setFontColor('#1E3A8A')
+    .setBackground('#E0F2FE')
+    .setFontColor('#0C4A6E')
 }
 
 function GOOD_writeKpiCards_(sheet, metrics) {
   GOOD_writeKpiCard_(sheet, 4, 1, 'Paid + Promo Trial', metrics.combined, '#2563EB')
-  GOOD_writeKpiCard_(sheet, 4, 6, 'Paid Only', metrics.paidOnly, '#7C3AED')
-  GOOD_writeKpiCard_(sheet, 4, 10, 'Paid + First Payment', metrics.paidWithFirstPayment, '#EA580C')
+  GOOD_writeKpiCard_(sheet, 4, 5, 'Paid Only', metrics.paidOnly, '#7C3AED')
+  GOOD_writeKpiCard_(sheet, 4, 9, 'Paid + First Payment', metrics.paidWithFirstPayment, '#EA580C')
 }
 
 function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
-  const card = sheet.getRange(topRow, startCol, 4, 3)
+  const card = sheet.getRange(topRow, startCol, 4, 4)
   card
     .setBorder(true, true, true, true, true, true, '#CBD5E1', SpreadsheetApp.BorderStyle.SOLID)
     .setVerticalAlignment('middle')
 
-  const titleR = sheet.getRange(topRow, startCol, 1, 3)
+  const titleR = sheet.getRange(topRow, startCol, 1, 4)
   titleR.merge()
   titleR
     .setValue(title)
@@ -251,7 +250,7 @@ function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
 
-  const arrR = sheet.getRange(topRow + 1, startCol, 1, 3)
+  const arrR = sheet.getRange(topRow + 1, startCol, 1, 4)
   arrR.merge()
   arrR
     .setValue(data.arr || 0)
@@ -262,23 +261,43 @@ function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
     .setBackground('#F8FAFC')
     .setFontColor('#0F172A')
 
-  const labelR = sheet.getRange(topRow + 2, startCol, 1, 3)
-  labelR.setValues([['Subscriptions', '', 'Seats']])
-  labelR
+  const labelSubsR = sheet.getRange(topRow + 2, startCol, 1, 2)
+  labelSubsR.merge()
+  labelSubsR
+    .setValue('Subscriptions')
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
     .setBackground('#EEF2FF')
     .setFontColor('#334155')
 
-  const valueR = sheet.getRange(topRow + 3, startCol, 1, 3)
-  valueR.setValues([[data.subscriptions || 0, '', data.totalSeats || 0]])
-  valueR
+  const labelSeatsR = sheet.getRange(topRow + 2, startCol + 2, 1, 2)
+  labelSeatsR.merge()
+  labelSeatsR
+    .setValue('Seats')
+    .setFontWeight('bold')
+    .setHorizontalAlignment('center')
+    .setBackground('#EEF2FF')
+    .setFontColor('#334155')
+
+  const valueSubsR = sheet.getRange(topRow + 3, startCol, 1, 2)
+  valueSubsR.merge()
+  valueSubsR
+    .setValue(data.subscriptions || 0)
     .setHorizontalAlignment('center')
     .setFontWeight('bold')
     .setBackground('#FFFFFF')
     .setFontColor('#0F172A')
-  valueR.getCell(1, 1).setNumberFormat('0')
-  valueR.getCell(1, 3).setNumberFormat('0')
+    .setNumberFormat('0')
+
+  const valueSeatsR = sheet.getRange(topRow + 3, startCol + 2, 1, 2)
+  valueSeatsR.merge()
+  valueSeatsR
+    .setValue(data.totalSeats || 0)
+    .setHorizontalAlignment('center')
+    .setFontWeight('bold')
+    .setBackground('#FFFFFF')
+    .setFontColor('#0F172A')
+    .setNumberFormat('0')
 }
 
 function GOOD_writeTable_(sheet, startRow, headers, rows) {
@@ -289,7 +308,7 @@ function GOOD_writeTable_(sheet, startRow, headers, rows) {
   headR
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
-    .setBackground('#0B132B')
+    .setBackground('#2563EB')
     .setFontColor('#F8FAFC')
 
   if (rows && rows.length) {
@@ -318,7 +337,10 @@ function GOOD_writeTable_(sheet, startRow, headers, rows) {
   }
 
   sheet.setFrozenRows(startRow)
-  sheet.autoResizeColumns(1, Math.max(headers.length, 12))
+  const usedCols = Math.max(headers.length, 12)
+  for (let c = 1; c <= usedCols; c++) {
+    sheet.setColumnWidth(c, 180)
+  }
 }
 
 function GOOD_contiguousWidth_(headerRowArray) {
