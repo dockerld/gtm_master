@@ -323,18 +323,18 @@ function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
     // Purchase date = earliest first_payment_at across all subs (do NOT overwrite later)
     const purchaseIso = ARR_minIso_(rows.map(r => r.first_payment_at).filter(Boolean))
 
-    // Churn date = if no active subs, take max(current_period_end) or canceled_at among rows
+    // Churn date = if no active subs, take max(canceled_at) among rows
     let churnIso = ""
     if (!hasActive) {
       churnIso = ARR_maxIso_(
         rows
-          .map(r => r.current_period_end || r.canceled_at)
+          .map(r => r.canceled_at)
           .filter(Boolean)
       )
     }
 
     // Pick the “current” subscription to derive plan/billing/arr:
-    // - prefer active with latest current_period_start; else latest current_period_start among all
+    // - prefer active with latest created_at; else latest created_at among all
     const bestForPlan = ARR_pickBestSubscriptionRow_(hasActive ? activeRows : rows)
 
     const interval = String(bestForPlan.interval || "").toLowerCase()
@@ -397,10 +397,10 @@ function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
 function ARR_pickBestSubscriptionRow_(rows) {
   if (!rows || !rows.length) return {}
 
-  // Prefer latest current_period_start, else created_at
+  // Prefer latest created_at, else first_payment_at
   const scored = rows.slice().sort((a, b) => {
-    const aKey = ARR_toMs_(a.current_period_start) || ARR_toMs_(a.created_at) || 0
-    const bKey = ARR_toMs_(b.current_period_start) || ARR_toMs_(b.created_at) || 0
+    const aKey = ARR_toMs_(a.created_at) || ARR_toMs_(a.first_payment_at) || 0
+    const bKey = ARR_toMs_(b.created_at) || ARR_toMs_(b.first_payment_at) || 0
     return bKey - aKey
   })
 

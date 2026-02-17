@@ -6,6 +6,7 @@
  *  - Run only PostHog
  *  - Run only Stripe
  *  - Run only Clerk
+ *  - Run The Ring only
  *  - Rebuild canon tables
  *  - Push UpSale targets to Notion  ✅ NEW
  *
@@ -44,6 +45,8 @@ function onOpen() {
     .addItem('Run only PostHog', 'ui_run_only_posthog')
     .addItem('Run only Stripe', 'ui_run_only_stripe')
     .addItem('Run only Clerk', 'ui_run_only_clerk')
+    .addItem('Run The Ring only', 'ui_run_only_ring')
+    .addItem('Publish The Good Stuff', 'ui_publish_the_good_stuff')
     .addSeparator()
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
     .addSeparator()
@@ -99,6 +102,22 @@ function ui_run_only_clerk() {
       { name: 'build_canon_users', fn: build_canon_users },
       { name: 'render_sauron_view', fn: render_sauron_view },
       { name: 'render_ring_view', fn: render_ring_view }
+    ])
+  })
+}
+
+function ui_run_only_ring() {
+  return uiRunWrapped_('ui_run_only_ring', () => {
+    runSteps_([
+      { name: 'render_ring_view', fn: render_ring_view }
+    ])
+  })
+}
+
+function ui_publish_the_good_stuff() {
+  return uiRunWrapped_('ui_publish_the_good_stuff', () => {
+    runSteps_([
+      { name: 'publish_the_good_stuff', fn: publish_the_good_stuff }
     ])
   })
 }

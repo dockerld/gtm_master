@@ -662,7 +662,7 @@ function PAYING_addMonths_(key, n) {
 }
 
 function PAYING_subStartKey_(sub) {
-  const startIso = PAYING_str_(sub.created_at || sub.current_period_start)
+  const startIso = PAYING_str_(sub.created_at)
   return PAYING_monthKeyFromIso_(startIso)
 }
 

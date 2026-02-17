@@ -8,9 +8,10 @@
  *  - STRIPE_KEY
  *
  * Key fixes:
- * 1) Skips subscriptions with metadata.exclude_from_ring = true (also 1/yes)
+ * 1) Pulls ALL subscriptions (does not exclude metadata.exclude_from_ring)
  * 2) first_payment_at computed WITHOUT per-subscription invoice calls
- * 3) ✅ FIX: invoice->subscription linkage now uses robust extraction:
+ * 3) Pulls payment-method presence + best-effort payment method created timestamp
+ * 4) ✅ FIX: invoice->subscription linkage now uses robust extraction:
  *    - invoice.subscription
  *    - invoice.parent.subscription_details.subscription
  *    - invoice.lines.data[].parent.*.subscription
@@ -30,9 +31,8 @@ const STRIPE_RAW_CFG = {
   }
 }
 
-// ===== Metadata filter config =====
+// ===== Metadata field config =====
 const STRIPE_EXCLUDE_META_KEY = 'exclude_from_ring'
-const STRIPE_EXCLUDE_REASON_KEY = 'exclude_reason' // optional
 
 // ===== First payment settings (bulk invoice scan) =====
 const STRIPE_INVOICE_LOOKBACK_DAYS = 540          // ~18 months
@@ -60,6 +60,10 @@ function stripe_pull_subscriptions_to_raw() {
 
     'stripe_customer_id',
     'customer_email',
+    'has_payment_method',
+    'payment_method_source',
+    'payment_method_id',
+    'payment_method_created_at',
 
     'currency',
     'interval',
@@ -82,24 +86,16 @@ function stripe_pull_subscriptions_to_raw() {
 
     'cancel_at_period_end',
     'canceled_at',
-    'current_period_start',
-    'current_period_end',
 
-    'metadata_exclude_from_ring',
-    'metadata_exclude_reason'
+    'metadata_json',
+    'metadata_exclude_from_ring'
   ]
 
   // 1) Fetch subscriptions (expanded customer + discounts)
-  const subsAll = stripeFetchAllSubscriptionsExpanded_(apiKey)
+  const subs = stripeFetchAllSubscriptionsExpanded_(apiKey)
+  Logger.log(`Fetched ${subs.length} subscriptions total`)
 
-  // 2) Filter excluded via metadata
-  const subs = subsAll.filter(sub => !stripeShouldExcludeSub_(sub))
-
-  Logger.log(
-    `Fetched ${subsAll.length} subscriptions total; keeping ${subs.length}; excluded ${subsAll.length - subs.length} via metadata`
-  )
-
-  // 3) Build first_payment_at map from PAID invoices (bulk scan)
+  // 2) Build first_payment_at map from PAID invoices (bulk scan)
   const firstPaidBySubId = stripeBuildFirstPaidAtBySubscription_(apiKey, {
     lookbackDays: STRIPE_INVOICE_LOOKBACK_DAYS,
     pageLimit: STRIPE_INVOICE_PAGE_LIMIT,
@@ -108,11 +104,20 @@ function stripe_pull_subscriptions_to_raw() {
     requireAmountPaidPositive: STRIPE_REQUIRE_AMOUNT_PAID_POSITIVE
   })
 
-  // 4) Collect discount coupon ids + promotion code ids for lookup
+  // 3) Collect discount coupon ids + promotion code ids for lookup
   const couponIds = new Set()
   const promoIds = new Set()
+  const paymentMethodIds = new Set()
 
   subs.forEach(sub => {
+    const customerObj = (sub && sub.customer && typeof sub.customer === 'object') ? sub.customer : null
+
+    const subDefaultPmId = stripeExtractId_(sub.default_payment_method)
+    const customerDefaultPmId = stripeExtractId_(customerObj && customerObj.invoice_settings && customerObj.invoice_settings.default_payment_method)
+
+    if (subDefaultPmId && /^pm_/.test(subDefaultPmId)) paymentMethodIds.add(subDefaultPmId)
+    if (customerDefaultPmId && /^pm_/.test(customerDefaultPmId)) paymentMethodIds.add(customerDefaultPmId)
+
     const discountsArr = stripeNormalizeDiscounts_(sub)
     discountsArr.forEach(d => {
       const couponId =
@@ -126,8 +131,9 @@ function stripe_pull_subscriptions_to_raw() {
 
   const couponMap = stripeFetchCouponsMap_(apiKey, Array.from(couponIds))
   const promoMap = stripeFetchPromotionCodesMap_(apiKey, Array.from(promoIds))
+  const paymentMethodMap = stripeFetchPaymentMethodsMap_(apiKey, Array.from(paymentMethodIds))
 
-  // 5) Build rows
+  // 4) Build rows
   const rows = subs.map(sub => {
     const subId = strOrBlank_(sub.id)
     const firstPaymentAt = firstPaidBySubId.get(subId) || ''
@@ -184,11 +190,47 @@ function stripe_pull_subscriptions_to_raw() {
     }
 
     // customer
-    const customerId = sub.customer && sub.customer.id ? String(sub.customer.id) : strOrBlank_(sub.customer)
+    const customerObj = (sub && sub.customer && typeof sub.customer === 'object') ? sub.customer : null
+    const customerId = customerObj && customerObj.id ? String(customerObj.id) : strOrBlank_(sub.customer)
     const email =
-      (sub.customer && sub.customer.email) ||
+      (customerObj && customerObj.email) ||
       sub.customer_email ||
       ''
+
+    // payment method presence (subscription-level first, then customer-level)
+    const subDefaultPmId = stripeExtractId_(sub.default_payment_method)
+    const customerDefaultPmId = stripeExtractId_(customerObj && customerObj.invoice_settings && customerObj.invoice_settings.default_payment_method)
+    const subDefaultSourceId = stripeExtractId_(sub.default_source)
+    const customerDefaultSourceId = stripeExtractId_(customerObj && customerObj.default_source)
+
+    let hasPaymentMethod = false
+    let paymentMethodSource = ''
+    let paymentMethodId = ''
+    if (subDefaultPmId) {
+      hasPaymentMethod = true
+      paymentMethodSource = 'subscription.default_payment_method'
+      paymentMethodId = subDefaultPmId
+    } else if (customerDefaultPmId) {
+      hasPaymentMethod = true
+      paymentMethodSource = 'customer.invoice_settings.default_payment_method'
+      paymentMethodId = customerDefaultPmId
+    } else if (subDefaultSourceId) {
+      hasPaymentMethod = true
+      paymentMethodSource = 'subscription.default_source'
+      paymentMethodId = subDefaultSourceId
+    } else if (customerDefaultSourceId) {
+      hasPaymentMethod = true
+      paymentMethodSource = 'customer.default_source'
+      paymentMethodId = customerDefaultSourceId
+    }
+
+    // NOTE: Stripe does not expose an "attached_at" on payment_method objects.
+    // This is payment_method.created (best-effort proxy), not exact attach time.
+    let paymentMethodCreatedAt = ''
+    if (paymentMethodId && /^pm_/.test(paymentMethodId)) {
+      const pmObj = paymentMethodMap[paymentMethodId]
+      if (pmObj && pmObj.created) paymentMethodCreatedAt = stripeUnixToIso_(pmObj.created)
+    }
 
     // discount fields (use first discount)
     let discountPercent = ''
@@ -222,7 +264,7 @@ function stripe_pull_subscriptions_to_raw() {
     // metadata trace
     const md = sub.metadata || {}
     const mdExclude = strOrBlank_(md[STRIPE_EXCLUDE_META_KEY])
-    const mdReason = strOrBlank_(md[STRIPE_EXCLUDE_REASON_KEY])
+    const metadataJson = stripeSafeJson_(md)
 
     return [
       subId,
@@ -233,6 +275,10 @@ function stripe_pull_subscriptions_to_raw() {
 
       strOrBlank_(customerId),
       strOrBlank_(email),
+      hasPaymentMethod,
+      paymentMethodSource,
+      paymentMethodId,
+      paymentMethodCreatedAt,
 
       strOrBlank_(currency),
       strOrBlank_(interval),
@@ -255,19 +301,17 @@ function stripe_pull_subscriptions_to_raw() {
 
       sub.cancel_at_period_end === true,
       stripeUnixToIso_(sub.canceled_at),
-      stripeUnixToIso_(sub.current_period_start),
-      stripeUnixToIso_(sub.current_period_end),
 
-      mdExclude,
-      mdReason
+      metadataJson,
+      mdExclude
     ]
   })
 
   stripeOverwriteSheet_(sh, headers, rows)
 
   const seconds = (new Date() - t0) / 1000
-  writeSyncLogSafe_('stripe_pull_subscriptions_to_raw', 'ok', subsAll.length, rows.length, seconds, '')
-  return { rows_in: subsAll.length, rows_out: rows.length, excluded: subsAll.length - subs.length }
+  writeSyncLogSafe_('stripe_pull_subscriptions_to_raw', 'ok', subs.length, rows.length, seconds, '')
+  return { rows_in: subs.length, rows_out: rows.length, excluded: 0 }
 }
 
 function stripe_pull_all_raw() {
@@ -286,11 +330,11 @@ function stripeGetSecretKey_() {
   return key
 }
 
-function stripeShouldExcludeSub_(sub) {
-  const md = (sub && sub.metadata) ? sub.metadata : {}
-  const raw = md ? md[STRIPE_EXCLUDE_META_KEY] : ''
-  const v = String(raw || '').trim().toLowerCase()
-  return v === 'true' || v === '1' || v === 'yes'
+function stripeExtractId_(valueOrObj) {
+  if (!valueOrObj) return ''
+  if (typeof valueOrObj === 'string') return valueOrObj.trim()
+  if (typeof valueOrObj === 'object' && valueOrObj.id) return String(valueOrObj.id).trim()
+  return ''
 }
 
 /**
@@ -513,6 +557,34 @@ function stripeFetchPromotionCodesMap_(apiKey, promoIds) {
   return map
 }
 
+function stripeFetchPaymentMethodsMap_(apiKey, pmIds) {
+  const map = {}
+  if (!pmIds || !pmIds.length) return map
+
+  pmIds.forEach(id => {
+    if (!/^pm_/.test(String(id || ''))) return
+
+    const url = `${STRIPE_RAW_CFG.API_BASE}/payment_methods/${encodeURIComponent(id)}`
+    const res = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      muteHttpExceptions: true
+    })
+
+    const code = res.getResponseCode()
+    if (code >= 300) {
+      Logger.log(`Warning: failed to fetch payment_method ${id}: ${res.getContentText()}`)
+      return
+    }
+
+    map[id] = JSON.parse(res.getContentText())
+    Utilities.sleep(100)
+  })
+
+  Logger.log(`Fetched ${Object.keys(map).length} payment methods`)
+  return map
+}
+
 function stripeUnixToIso_(sec) {
   if (!sec) return ''
   const d = new Date(Number(sec) * 1000)
@@ -571,4 +643,12 @@ function lockWrapSafe_(name, fn) {
 function strOrBlank_(v) {
   if (v === null || v === undefined) return ''
   return String(v).trim()
+}
+
+function stripeSafeJson_(obj) {
+  try {
+    return JSON.stringify(obj == null ? {} : obj)
+  } catch (e) {
+    return '{}'
+  }
 }

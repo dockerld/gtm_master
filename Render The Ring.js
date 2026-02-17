@@ -5,15 +5,29 @@
  *
  * Layout:
  * - Big KPIs on top:
- *    ARR, Subscriptions, Total Seats
+ *    - Paid + Promo Trial: ARR, Subscriptions, Total Seats
+ *    - Paid Only: ARR, Subscriptions, Total Seats
+ *    - Paid + First Payment At: ARR, Subscriptions, Total Seats
  * - Table headers on Row 3 starting Col B
  * - Table data starts Row 4 starting Col B
  *
  * Source:
  * - raw_stripe_subscriptions (header row = 1)
+ * - Manual Stripe Changes (optional manual overrides)
+ * - raw_posthog_user_metrics (fallback subscription->email mapping)
  *
  * Rules:
- * - Only include active subscriptions
+ * - Include active subscriptions
+ * - Include trialing subscriptions ONLY when has_payment_method is true
+ * - Exclude subscriptions listed in Manual Stripe Changes when effective reason
+ *   (cancel_reason first, else exclude_reason) contains:
+ *     "internal", "testing", or "duplicate" (case-insensitive)
+ * - If effective reason contains "free seat":
+ *     monthly subscription amount -= 30 * quantity
+ *     yearly subscription amount -= 288 * quantity
+ * - Display status labels:
+ *     active -> "Paid"
+ *     trialing(+payment method) -> "Promo Trial"
  * - Exclude subscriptions where:
  *     discount_percent == 100 AND discount_duration == 'forever'
  * - Total Seats comes from quantity_total
@@ -42,11 +56,13 @@
 const RING_CFG = {
   SHEET_NAME: 'The Ring',
   INPUT_SHEET: 'raw_stripe_subscriptions',
+  MANUAL_CHANGES_SHEET: 'Manual Stripe Changes',
 
   // Clerk enrichment sources
   CLERK_USERS_SHEET: 'raw_clerk_users',
   CLERK_MEMBERSHIPS_SHEET: 'raw_clerk_memberships',
   CLERK_ORGS_SHEET: 'raw_clerk_orgs',
+  POSTHOG_USERS_SHEET: 'raw_posthog_user_metrics',
 
   // Ring layout
   KPI_ROW_LABEL: 1,
@@ -56,11 +72,24 @@ const RING_CFG = {
   START_COL: 2,        // Col B
   DATA_START_ROW: 4,
 
-  // KPIs positions (B,C,D)
+  // KPI blocks
+  // Combined block keeps legacy B/C/D cells used by weekly email.
   KPI_COLS: {
-    ARR: 2,            // B
-    SUBSCRIPTIONS: 3,  // C
-    TOTAL_SEATS: 4     // D
+    COMBINED: {
+      ARR: 2,            // B
+      SUBSCRIPTIONS: 3,  // C
+      TOTAL_SEATS: 4     // D
+    },
+    PAID_ONLY: {
+      ARR: 6,            // F
+      SUBSCRIPTIONS: 7,  // G
+      TOTAL_SEATS: 8     // H
+    },
+    PAID_WITH_FIRST_PAYMENT: {
+      ARR: 10,           // J
+      SUBSCRIPTIONS: 11, // K
+      TOTAL_SEATS: 12    // L
+    }
   },
 
   // Table headers (Row 3, starting col B)
@@ -88,6 +117,10 @@ const RING_CFG = {
   DATETIME_FMT: 'yyyy-mm-dd hh:mm:ss' // ✅ NEW
 }
 
+const RING_EXCLUDED_REASON_TERMS = ['internal', 'testing', 'duplicate']
+const RING_FREE_SEAT_MONTHLY_DISCOUNT = 30
+const RING_FREE_SEAT_YEARLY_DISCOUNT = 288
+
 function render_ring_view() {
   lockWrapCompat_('render_ring_view', () => {
     const t0 = new Date()
@@ -97,29 +130,56 @@ function render_ring_view() {
 
       const src = ss.getSheetByName(RING_CFG.INPUT_SHEET)
       if (!src) throw new Error(`Missing input sheet: ${RING_CFG.INPUT_SHEET}`)
+      const manualChangesSrc = ss.getSheetByName(RING_CFG.MANUAL_CHANGES_SHEET)
 
       // Load Clerk sources for enrichment
       const clerkUsersSh = ss.getSheetByName(RING_CFG.CLERK_USERS_SHEET)
       const clerkMemsSh  = ss.getSheetByName(RING_CFG.CLERK_MEMBERSHIPS_SHEET)
       const clerkOrgsSh  = ss.getSheetByName(RING_CFG.CLERK_ORGS_SHEET)
+      const posthogUsersSh = ss.getSheetByName(RING_CFG.POSTHOG_USERS_SHEET)
 
       const clerkUsers = clerkUsersSh ? readSheetObjects_(clerkUsersSh, 1) : []
       const clerkMems  = clerkMemsSh  ? readSheetObjects_(clerkMemsSh, 1)  : []
       const clerkOrgs  = clerkOrgsSh  ? readSheetObjects_(clerkOrgsSh, 1)  : []
+      const posthogUsers = posthogUsersSh ? readSheetObjects_(posthogUsersSh, 1) : []
 
-      const ringIndexes = buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs)
+      const ringIndexes = buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers)
 
       // Stripe subscriptions
       const rows = readSheetObjects_(src, 1)
+      const manualChangesBySubId = buildManualStripeChangesBySubId_(manualChangesSrc)
 
       const out = []
-      let totalARR = 0
-      let totalSeats = 0
-      let subsCount = 0
+      let combinedARR = 0
+      let combinedSeats = 0
+      let combinedSubs = 0
+      let paidOnlyARR = 0
+      let paidOnlySeats = 0
+      let paidOnlySubs = 0
+      let paidWithFirstPaymentARR = 0
+      let paidWithFirstPaymentSeats = 0
+      let paidWithFirstPaymentSubs = 0
 
       for (const r of rows) {
-        const status = str_(r.status).toLowerCase()
-        if (status !== 'active') continue
+        const statusRaw = str_(r.status).toLowerCase()
+        const hasPaymentMethod = toBool_(r.has_payment_method)
+
+        const stripeSubscriptionId =
+          str_(r.stripe_subscription_id) ||
+          str_(r.subscription_id) ||
+          str_(r.subscription) ||
+          str_(r.id) ||
+          ''
+
+        const manualChange = stripeSubscriptionId ? (manualChangesBySubId.get(stripeSubscriptionId) || null) : null
+        const manualReason = manualChange ? (manualChange.reason || '') : ''
+        const manualQuantity = manualChange ? manualChange.quantity : 0
+        if (manualReason && RING_EXCLUDED_REASON_TERMS.some(term => manualReason.includes(term))) continue
+
+        let displayStatus = ''
+        if (statusRaw === 'active') displayStatus = 'Paid'
+        else if (statusRaw === 'trialing' && hasPaymentMethod) displayStatus = 'Promo Trial'
+        else continue
 
         const discountPercentRaw = num_(r.discount_percent) // 0-100
         const discountDuration = str_(r.discount_duration).toLowerCase()
@@ -131,7 +191,8 @@ function render_ring_view() {
         const interval = str_(r.interval).toLowerCase()
 
         // Treat raw amount as whole dollars always (1800 => $1,800.00)
-        const amount = moneyAmount_(r.amount)
+        const amountRaw = moneyAmount_(r.amount)
+        const amount = applyManualAmountOverride_(amountRaw, interval, manualReason, manualQuantity)
 
         const { mrr, arr } = computeMrrArr_(amount, interval)
 
@@ -146,13 +207,6 @@ function render_ring_view() {
         const stripeEmailRaw = str_(r.customer_email || r.email || r.billing_email)
         const stripeEmailKey = normalizeEmailCompat_(stripeEmailRaw)
 
-        const stripeSubscriptionId =
-          str_(r.stripe_subscription_id) ||
-          str_(r.subscription_id) ||
-          str_(r.subscription) ||
-          str_(r.id) ||
-          ''
-
         const resolved = resolveRingCustomer_(stripeEmailKey, stripeSubscriptionId, ringIndexes)
 
         const email = resolved.email || stripeEmailRaw
@@ -165,15 +219,27 @@ function render_ring_view() {
         // Convert percent to decimal for Sheets percent format (25 -> 0.25)
         const discountPctDecimal = clamp01_(discountPercentRaw / 100)
 
-        subsCount += 1
-        totalARR += arr
-        totalSeats += seats
+        combinedSubs += 1
+        combinedARR += arr
+        combinedSeats += seats
+
+        if (displayStatus === 'Paid') {
+          paidOnlySubs += 1
+          paidOnlyARR += arr
+          paidOnlySeats += seats
+
+          if (firstPaymentAtIso) {
+            paidWithFirstPaymentSubs += 1
+            paidWithFirstPaymentARR += arr
+            paidWithFirstPaymentSeats += seats
+          }
+        }
 
         out.push([
           email,
           customerName,
           orgName,
-          'active',
+          displayStatus,
           firstPaymentAtDate,   // ✅ NEW column value
           interval || '',
           amount,
@@ -191,9 +257,21 @@ function render_ring_view() {
 
       // KPIs
       writeKpis_(sh, {
-        arr: totalARR,
-        subscriptions: subsCount,
-        totalSeats
+        combined: {
+          arr: combinedARR,
+          subscriptions: combinedSubs,
+          totalSeats: combinedSeats
+        },
+        paidOnly: {
+          arr: paidOnlyARR,
+          subscriptions: paidOnlySubs,
+          totalSeats: paidOnlySeats
+        },
+        paidWithFirstPayment: {
+          arr: paidWithFirstPaymentARR,
+          subscriptions: paidWithFirstPaymentSubs,
+          totalSeats: paidWithFirstPaymentSeats
+        }
       })
 
       // Headers
@@ -239,7 +317,7 @@ function render_ring_view() {
  * Clerk enrichment indexes
  * ========================= */
 
-function buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs) {
+function buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers) {
   // org_id -> org_name
   const orgNameByOrgId = new Map()
   for (const o of (clerkOrgs || [])) {
@@ -273,9 +351,9 @@ function buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs) {
 
   // stripe_subscription_id -> list of users
   const usersByStripeSubId = new Map()
+  const usersByEmailKey = new Map()
   for (const u of (clerkUsers || [])) {
     const subId = str_(u.stripe_subscription_id || u.stripeSubscriptionId)
-    if (!subId) continue
 
     const email = str_(u.email)
     const emailKey = str_(u.email_key) || normalizeEmailCompat_(email)
@@ -283,23 +361,60 @@ function buildRingIndexes_(clerkUsers, clerkMems, clerkOrgs) {
 
     const name = str_(u.name)
     const orgId = str_(u.org_id)
+    const userObj = { email, emailKey, name, orgId }
+
+    if (!usersByEmailKey.has(emailKey)) usersByEmailKey.set(emailKey, userObj)
+
+    if (!subId) continue
 
     if (!usersByStripeSubId.has(subId)) usersByStripeSubId.set(subId, [])
-    usersByStripeSubId.get(subId).push({ email, emailKey, name, orgId })
+    usersByStripeSubId.get(subId).push(userObj)
+  }
+
+  // Fallback map from PostHog: stripe_subscription_id -> Set(email_key)
+  const posthogEmailKeysByStripeSubId = new Map()
+  for (const p of (posthogUsers || [])) {
+    const subId = str_(p.stripe_subscription_id || p.subscription_id || p.subscription)
+    if (!subId) continue
+
+    const emailKey = str_(p.email_key) || normalizeEmailCompat_(str_(p.email))
+    if (!emailKey) continue
+
+    if (!posthogEmailKeysByStripeSubId.has(subId)) posthogEmailKeysByStripeSubId.set(subId, new Set())
+    posthogEmailKeysByStripeSubId.get(subId).add(emailKey)
   }
 
   return {
     orgNameByOrgId,
     membershipsByEmailKey,
-    usersByStripeSubId
+    usersByStripeSubId,
+    usersByEmailKey,
+    posthogEmailKeysByStripeSubId
   }
 }
 
 function resolveRingCustomer_(stripeEmailKey, stripeSubscriptionId, idx) {
   const subId = str_(stripeSubscriptionId)
-  const candidates = (subId && idx.usersByStripeSubId.has(subId))
+  let candidates = (subId && idx.usersByStripeSubId.has(subId))
     ? idx.usersByStripeSubId.get(subId).slice()
     : []
+
+  // Fallback: if Clerk users are not directly keyed by sub id, use PostHog mapping
+  // (sub id -> email_key) then map those email keys back to Clerk users.
+  if (!candidates.length && subId && idx.posthogEmailKeysByStripeSubId && idx.posthogEmailKeysByStripeSubId.has(subId)) {
+    const emailKeys = Array.from(idx.posthogEmailKeysByStripeSubId.get(subId) || [])
+    const fromPosthog = []
+    emailKeys.forEach(emailKey => {
+      const hit = idx.usersByEmailKey && idx.usersByEmailKey.get(emailKey)
+      if (hit) fromPosthog.push(hit)
+    })
+    candidates = fromPosthog
+  }
+
+  // Final fallback: Stripe customer email -> Clerk user email
+  if (!candidates.length && stripeEmailKey && idx.usersByEmailKey && idx.usersByEmailKey.has(stripeEmailKey)) {
+    candidates = [idx.usersByEmailKey.get(stripeEmailKey)]
+  }
 
   if (!candidates.length) return { email: '', customerName: '', orgName: '' }
 
@@ -346,26 +461,53 @@ function resolveRingCustomer_(stripeEmailKey, stripeSubscriptionId, idx) {
  * KPI + Formatting helpers
  * ========================= */
 
-function writeKpis_(sheet, { arr, subscriptions, totalSeats }) {
-  sheet.getRange(RING_CFG.KPI_ROW_LABEL, RING_CFG.KPI_COLS.ARR).setValue('ARR')
-  sheet.getRange(RING_CFG.KPI_ROW_LABEL, RING_CFG.KPI_COLS.SUBSCRIPTIONS).setValue('Subscriptions')
-  sheet.getRange(RING_CFG.KPI_ROW_LABEL, RING_CFG.KPI_COLS.TOTAL_SEATS).setValue('Total Seats')
+function writeKpis_(sheet, { combined, paidOnly, paidWithFirstPayment }) {
+  const combinedCols = RING_CFG.KPI_COLS.COMBINED
+  const paidCols = RING_CFG.KPI_COLS.PAID_ONLY
+  const paidWithFirstPaymentCols = RING_CFG.KPI_COLS.PAID_WITH_FIRST_PAYMENT
 
-  sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.ARR).setValue(arr || 0)
-  sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.SUBSCRIPTIONS).setValue(subscriptions || 0)
-  sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.TOTAL_SEATS).setValue(totalSeats || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, combinedCols.ARR).setValue('ARR (Paid + Promo Trial)')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, combinedCols.SUBSCRIPTIONS).setValue('Subscriptions (Paid + Promo Trial)')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, combinedCols.TOTAL_SEATS).setValue('Total Seats (Paid + Promo Trial)')
 
-  const labelRange = sheet.getRange(RING_CFG.KPI_ROW_LABEL, RING_CFG.KPI_COLS.ARR, 1, 3)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, combinedCols.ARR).setValue((combined && combined.arr) || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, combinedCols.SUBSCRIPTIONS).setValue((combined && combined.subscriptions) || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, combinedCols.TOTAL_SEATS).setValue((combined && combined.totalSeats) || 0)
+
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, paidCols.ARR).setValue('ARR (Paid Only)')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, paidCols.SUBSCRIPTIONS).setValue('Subscriptions (Paid Only)')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, paidCols.TOTAL_SEATS).setValue('Total Seats (Paid Only)')
+
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidCols.ARR).setValue((paidOnly && paidOnly.arr) || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidCols.SUBSCRIPTIONS).setValue((paidOnly && paidOnly.subscriptions) || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidCols.TOTAL_SEATS).setValue((paidOnly && paidOnly.totalSeats) || 0)
+
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, paidWithFirstPaymentCols.ARR).setValue('ARR (Paid + First Payment At)')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, paidWithFirstPaymentCols.SUBSCRIPTIONS).setValue('Subscriptions (Paid + First Payment At)')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, paidWithFirstPaymentCols.TOTAL_SEATS).setValue('Total Seats (Paid + First Payment At)')
+
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidWithFirstPaymentCols.ARR).setValue((paidWithFirstPayment && paidWithFirstPayment.arr) || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidWithFirstPaymentCols.SUBSCRIPTIONS).setValue((paidWithFirstPayment && paidWithFirstPayment.subscriptions) || 0)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidWithFirstPaymentCols.TOTAL_SEATS).setValue((paidWithFirstPayment && paidWithFirstPayment.totalSeats) || 0)
+
+  formatKpiGroup_(sheet, combinedCols)
+  formatKpiGroup_(sheet, paidCols)
+  formatKpiGroup_(sheet, paidWithFirstPaymentCols)
+
+  sheet.getRange(1, 1, 2, Math.max(sheet.getLastColumn(), 14)).setVerticalAlignment('middle')
+}
+
+function formatKpiGroup_(sheet, cols) {
+  const startCol = Math.min(cols.ARR, cols.SUBSCRIPTIONS, cols.TOTAL_SEATS)
+  const labelRange = sheet.getRange(RING_CFG.KPI_ROW_LABEL, startCol, 1, 3)
   labelRange.setFontWeight('bold').setHorizontalAlignment('center')
 
-  const valueRange = sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.ARR, 1, 3)
+  const valueRange = sheet.getRange(RING_CFG.KPI_ROW_VALUE, startCol, 1, 3)
   valueRange.setFontWeight('bold').setFontSize(22).setHorizontalAlignment('center')
 
-  sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.ARR).setNumberFormat(RING_CFG.CURRENCY_FMT)
-  sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.SUBSCRIPTIONS).setNumberFormat(RING_CFG.INT_FMT)
-  sheet.getRange(RING_CFG.KPI_ROW_VALUE, RING_CFG.KPI_COLS.TOTAL_SEATS).setNumberFormat(RING_CFG.INT_FMT)
-
-  sheet.getRange(1, 1, 2, Math.max(sheet.getLastColumn(), 10)).setVerticalAlignment('middle')
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, cols.ARR).setNumberFormat(RING_CFG.CURRENCY_FMT)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, cols.SUBSCRIPTIONS).setNumberFormat(RING_CFG.INT_FMT)
+  sheet.getRange(RING_CFG.KPI_ROW_VALUE, cols.TOTAL_SEATS).setNumberFormat(RING_CFG.INT_FMT)
 }
 
 function applyRingFormats_(sheet, numDataRows) {
@@ -448,6 +590,61 @@ function isoToDateOrBlank_(iso) {
   return d
 }
 
+function buildManualStripeChangesBySubId_(sheet) {
+  const out = new Map()
+  if (!sheet) return out
+
+  const rows = readSheetObjects_(sheet, 1)
+  for (const r of rows) {
+    const subId =
+      str_(r.subscription_id) ||
+      str_(r.stripe_subscription_id) ||
+      str_(r.subscription) ||
+      ''
+    if (!subId) continue
+
+    const reason = pickManualReason_(r)
+    if (!reason) continue
+
+    const quantityRaw =
+      (r.quantity != null && r.quantity !== '') ? r.quantity :
+      (r.free_seats_quantity != null && r.free_seats_quantity !== '') ? r.free_seats_quantity :
+      ''
+    const quantityParsed = Number(quantityRaw)
+    const quantity = (isFinite(quantityParsed) && quantityParsed > 0)
+      ? Math.floor(quantityParsed)
+      : 0
+
+    if (!out.has(subId)) {
+      out.set(subId, { reason, quantity })
+    }
+  }
+
+  return out
+}
+
+function pickManualReason_(row) {
+  const cancelReason = str_(row.cancel_reason).toLowerCase()
+  if (cancelReason) return cancelReason
+  const excludeReason = str_(row.exclude_reason).toLowerCase()
+  if (excludeReason) return excludeReason
+  return str_(row.free_seats || row.free_seat).toLowerCase()
+}
+
+function applyManualAmountOverride_(amount, interval, reason, quantity) {
+  const amt = Number(amount || 0) || 0
+  const intv = String(interval || '').toLowerCase().trim()
+  const why = String(reason || '').toLowerCase().trim()
+  const qtyNum = Number(quantity)
+  const qty = (isFinite(qtyNum) && qtyNum > 0) ? Math.floor(qtyNum) : 0
+
+  if (!why.includes('free seat')) return amt
+  if (!qty) return amt
+  if (intv === 'month') return Math.max(0, amt - (RING_FREE_SEAT_MONTHLY_DISCOUNT * qty))
+  if (intv === 'year') return Math.max(0, amt - (RING_FREE_SEAT_YEARLY_DISCOUNT * qty))
+  return amt
+}
+
 /* =========================
  * Sheet reading helpers
  * ========================= */
@@ -498,6 +695,13 @@ function safeInt_(v) {
   const n = Number(v)
   if (isNaN(n) || !isFinite(n)) return 0
   return Math.max(0, Math.floor(n))
+}
+
+function toBool_(v) {
+  if (v === true) return true
+  if (typeof v === 'number') return v === 1
+  const s = String(v || '').trim().toLowerCase()
+  return s === 'true' || s === '1' || s === 'yes' || s === 'y'
 }
 
 function normalizeEmailCompat_(email) {

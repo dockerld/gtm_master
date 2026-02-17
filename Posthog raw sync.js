@@ -9,12 +9,16 @@
  *  - hours_recorded
  *  - ask_meeting
  *  - ask_global
+ *  - stripe_subscription_id (from Postgres Stripe subscription metadata.orgId -> users_orgs)
  *  - client_page_views
  *  - active_days (distinct days with ANY events)
  *  - clients_count (ORG-level; fanned back to user)
  *  - calendar_connected + first_calendar_connected_date
  *  - email_connected + first_email_connected_date
  *  - PM providers + first connected dates (one column per provider)
+ *  - other_integrations (comma-separated list of providers not in the core set)
+ *  - action_items_synced
+ *  - meeting_notes_synced
  *
  * Key improvements:
  * 1) Retries + exponential backoff for PostHog 429/502/503/504 (common transient failures)
@@ -58,6 +62,13 @@ const POSTHOG_RAW_CFG = {
     JITTER_MS: 250            // jitter to avoid thundering herd
   },
 
+  // Different environments may expose this table as singular or plural.
+  // We try these candidates in order and cache the first one that works.
+  STRIPE_SUB_TABLE_CANDIDATES: [
+    'postgres.stripe_subscription',
+    'postgres.stripe_subscriptions'
+  ],
+
   SHEETS: {
     SOURCE_USERS: 'raw_clerk_users',
     DEST: 'raw_posthog_user_metrics'
@@ -67,6 +78,8 @@ const POSTHOG_RAW_CFG = {
     EMAIL: 'email'
   }
 }
+
+let POSTHOG_STRIPE_TABLE_RESOLVED = null
 
 function posthog_pull_user_metrics_to_raw() {
   const t0 = new Date()
@@ -112,8 +125,7 @@ function posthog_pull_user_metrics_to_raw() {
 
     // 2a) DB-backed metrics (postgres.* tables via HogQL)
     {
-      const sql = posthogBuildHogQL_dbMetrics_(batch)
-      const rows = posthogRunQuery_(apiKey, projectId, sql, `dbMetrics batch ${batchNum}`)
+      const rows = posthogRunDbMetricsQueryWithStripe_(apiKey, projectId, batch, batchNum)
 
       rows.forEach(r => {
         const emailKey = normalizeEmail(r?.[0] || '')
@@ -142,7 +154,13 @@ function posthog_pull_user_metrics_to_raw() {
           pm_keeper_first_connected_date: String(r?.[14] || ''),
 
           pm_financial_cents_connected: String(r?.[15] || '').toLowerCase() === 'yes',
-          pm_financial_cents_first_connected_date: String(r?.[16] || '')
+          pm_financial_cents_first_connected_date: String(r?.[16] || ''),
+
+          other_integrations: String(r?.[17] || ''),
+
+          action_items_synced: Number(r?.[18] ?? 0),
+          meeting_notes_synced: Number(r?.[19] ?? 0),
+          stripe_subscription_id: String(r?.[20] || '')
         })
       })
     }
@@ -198,6 +216,10 @@ function posthog_pull_user_metrics_to_raw() {
     'pm_keeper_first_connected_date',
     'pm_financial_cents_connected',
     'pm_financial_cents_first_connected_date',
+    'other_integrations',
+    'action_items_synced',
+    'meeting_notes_synced',
+    'stripe_subscription_id',
 
     'pulled_at'
   ]
@@ -227,7 +249,13 @@ function posthog_pull_user_metrics_to_raw() {
       pm_keeper_first_connected_date: '',
 
       pm_financial_cents_connected: false,
-      pm_financial_cents_first_connected_date: ''
+      pm_financial_cents_first_connected_date: '',
+
+      other_integrations: '',
+
+      action_items_synced: 0,
+      meeting_notes_synced: 0,
+      stripe_subscription_id: ''
     }
 
     const clientViews = pageViewsMap.has(emailKey) ? pageViewsMap.get(emailKey) : 0
@@ -256,6 +284,10 @@ function posthog_pull_user_metrics_to_raw() {
       base.pm_keeper_first_connected_date || '',
       base.pm_financial_cents_connected,
       base.pm_financial_cents_first_connected_date || '',
+      base.other_integrations,
+      base.action_items_synced,
+      base.meeting_notes_synced,
+      base.stripe_subscription_id || '',
 
       pulledAt
     ]
@@ -281,8 +313,39 @@ function posthog_pull_user_metrics_to_raw() {
  * HogQL builders
  * ========================= */
 
-function posthogBuildHogQL_dbMetrics_(emailKeys) {
+function posthogBuildHogQL_dbMetrics_(emailKeys, stripeSubTableExpr) {
   const quoted = emailKeys.map(e => `'${String(e).replace(/'/g, "''")}'`).join(', ')
+  const stripeTable = String(stripeSubTableExpr || '').trim()
+
+  const stripeCtes = stripeTable
+    ? `
+, stripe_sub_per_org AS (
+  SELECT
+    JSONExtractString(toString(ss.metadata), 'orgId') AS org_id,
+    any(ss.id) AS stripe_subscription_id
+  FROM ${stripeTable} AS ss
+  WHERE length(coalesce(JSONExtractString(toString(ss.metadata), 'orgId'), '')) > 0
+  GROUP BY org_id
+)
+
+, stripe_sub_per_user AS (
+  SELECT
+    uo.user_id,
+    any(sso.stripe_subscription_id) AS stripe_subscription_id
+  FROM user_orgs AS uo
+  LEFT JOIN stripe_sub_per_org AS sso
+    ON toString(sso.org_id) = toString(uo.org_id)
+  GROUP BY uo.user_id
+)
+`
+    : `
+, stripe_sub_per_user AS (
+  SELECT
+    bu.user_id,
+    '' AS stripe_subscription_id
+  FROM base_users AS bu
+)
+`
 
   return `
 WITH [${quoted}] AS input_emails
@@ -361,6 +424,7 @@ WITH [${quoted}] AS input_emails
     ON occ.org_id = uo.org_id
   GROUP BY uo.user_id
 )
+${stripeCtes}
 
 , oauth_rollup AS (
   SELECT
@@ -379,10 +443,38 @@ WITH [${quoted}] AS input_emails
     formatDateTime(minIf(oc.created_at, oc.provider = 'KEEPER'), '%Y-%m-%d') AS pm_keeper_first_connected_date,
 
     if(countIf(oc.provider = 'FINANCIAL_CENTS') > 0, 'yes', 'no') AS pm_financial_cents_connected,
-    formatDateTime(minIf(oc.created_at, oc.provider = 'FINANCIAL_CENTS'), '%Y-%m-%d') AS pm_financial_cents_first_connected_date
+    formatDateTime(minIf(oc.created_at, oc.provider = 'FINANCIAL_CENTS'), '%Y-%m-%d') AS pm_financial_cents_first_connected_date,
+
+    arrayStringConcat(
+      arraySort(
+        groupUniqArrayIf(
+          oc.provider,
+          oc.provider NOT IN ('FINANCIAL_CENTS', 'KEEPER', 'KARBON', 'GOOGLE', 'COMPOSIO', 'MICROSOFT')
+          AND length(coalesce(oc.provider, '')) > 0
+        )
+      ),
+      ', '
+    ) AS other_integrations
 
   FROM postgres.oauth_credentials AS oc
   GROUP BY oc.user_id
+)
+
+, action_items_counts AS (
+  SELECT
+    ai.user_id,
+    countIf(ai.synced_to_practice_management = true) AS action_items_synced
+  FROM postgres.action_items AS ai
+  GROUP BY ai.user_id
+)
+
+, meeting_notes_counts AS (
+  SELECT
+    m.user_id,
+    count() AS meeting_notes_synced
+  FROM postgres.meetings AS m
+  WHERE m.sync_status IS NOT NULL
+  GROUP BY m.user_id
 )
 
 SELECT
@@ -409,17 +501,62 @@ SELECT
   coalesce(o.pm_keeper_first_connected_date, '') AS pm_keeper_first_connected_date,
 
   coalesce(o.pm_financial_cents_connected, 'no') AS pm_financial_cents_connected,
-  coalesce(o.pm_financial_cents_first_connected_date, '') AS pm_financial_cents_first_connected_date
+  coalesce(o.pm_financial_cents_first_connected_date, '') AS pm_financial_cents_first_connected_date,
+
+  coalesce(o.other_integrations, '') AS other_integrations,
+
+  coalesce(aic.action_items_synced, 0) AS action_items_synced,
+  coalesce(mnc.meeting_notes_synced, 0) AS meeting_notes_synced,
+  coalesce(sspu.stripe_subscription_id, '') AS stripe_subscription_id
 
 FROM base_users AS u
 LEFT JOIN meeting_bot_stats       AS mbs  ON mbs.user_id = u.user_id
 LEFT JOIN ask_counts              AS a    ON a.user_id = u.user_id
 LEFT JOIN clients_count_per_user  AS ccpu ON ccpu.user_id = u.user_id
 LEFT JOIN oauth_rollup            AS o    ON o.user_id = u.user_id
+LEFT JOIN action_items_counts     AS aic  ON aic.user_id = u.user_id
+LEFT JOIN meeting_notes_counts    AS mnc  ON mnc.user_id = u.user_id
+LEFT JOIN stripe_sub_per_user     AS sspu ON sspu.user_id = u.user_id
 
 ORDER BY u.email_key
 LIMIT 50000
   `.trim()
+}
+
+function posthogRunDbMetricsQueryWithStripe_(apiKey, projectId, emailKeys, batchNum) {
+  const labelBase = `dbMetrics batch ${batchNum}`
+
+  const candidates = POSTHOG_STRIPE_TABLE_RESOLVED
+    ? [POSTHOG_STRIPE_TABLE_RESOLVED]
+    : (POSTHOG_RAW_CFG.STRIPE_SUB_TABLE_CANDIDATES || []).slice()
+
+  // Final fallback keeps the job running even if stripe table naming differs.
+  candidates.push('')
+
+  let lastErr = null
+  for (const tableExpr of candidates) {
+    const sql = posthogBuildHogQL_dbMetrics_(emailKeys, tableExpr)
+    const tag = tableExpr ? tableExpr : 'no_stripe_join_fallback'
+
+    try {
+      const rows = posthogRunQuery_(apiKey, projectId, sql, `${labelBase} [${tag}]`)
+
+      if (tableExpr && !POSTHOG_STRIPE_TABLE_RESOLVED) {
+        POSTHOG_STRIPE_TABLE_RESOLVED = tableExpr
+        Logger.log(`PostHog: using Stripe table "${tableExpr}" for stripe_subscription_id`)
+      }
+      return rows
+    } catch (err) {
+      lastErr = err
+
+      if (POSTHOG_STRIPE_TABLE_RESOLVED) throw err
+      if (!tableExpr) break
+
+      Logger.log(`PostHog: dbMetrics failed with Stripe table "${tableExpr}" (${String(err && err.message ? err.message : err)}). Trying next fallback.`)
+    }
+  }
+
+  throw lastErr || new Error('PostHog dbMetrics failed with all Stripe table fallbacks.')
 }
 
 function posthogBuildHogQL_clientPageViews_(emailKeys, lookbackDays) {
