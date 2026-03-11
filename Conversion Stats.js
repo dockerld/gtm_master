@@ -9,11 +9,11 @@
  * - conversion_rate_within_7d_trial_end
  *
  * Conversion is determined by:
- * org_info.subscription_start_date (derived from Stripe)
+ * arr_raw_data.subscription_start_date (derived from Stripe)
  *
  * Clean conversion is determined by:
- * - trial_start_date + trial_end_date are read from org_info
- * - clean conversion uses purchase_date from org_info
+ * - trial_start_date + trial_end_date are read from arr_raw_data
+ * - clean conversion uses purchase_date from arr_raw_data
  **************************************************************/
 
 const CONV_CFG = {
@@ -24,8 +24,9 @@ const CONV_CFG = {
 
   INPUTS: {
     CLERK_ORGS: 'raw_clerk_orgs',
-    ORG_INFO: 'org_info'
+    ARR_RAW_DATA: 'arr_raw_data'
   },
+  ARR_RAW_HEADER_ROW: 2,
 
   MONTH_FMT: 'yyyy-MM',
   DATE_FMT: 'MM-dd-yy',
@@ -61,20 +62,21 @@ function render_org_conversion_audit() {
 
     const shOut = CONV_getOrCreateSheetCompat_(ss, CONV_CFG.AUDIT_SHEET)
     const shOrgs = ss.getSheetByName(CONV_CFG.INPUTS.CLERK_ORGS)
-    const shOrgInfo = ss.getSheetByName(CONV_CFG.INPUTS.ORG_INFO)
+    const shArrRaw = ss.getSheetByName(CONV_CFG.INPUTS.ARR_RAW_DATA)
 
     if (!shOrgs) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.CLERK_ORGS}`)
-    if (!shOrgInfo) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ORG_INFO}`)
+    if (!shArrRaw) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ARR_RAW_DATA}`)
 
     const tz = Session.getScriptTimeZone()
 
     const orgs = CONV_readSheetObjects_(shOrgs, 1)
-    const orgInfo = CONV_readSheetObjects_(shOrgInfo, 1)
+    const arrRawRows = CONV_readSheetObjects_(shArrRaw, CONV_CFG.ARR_RAW_HEADER_ROW)
 
-    const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
+    const orgInfoById = CONV_buildOrgInfoById_(arrRawRows)
 
     const headers = [
       'org_id',
+      'app_org_id',
       'org_name',
       'org_created_at',
       'cohort_month',
@@ -99,6 +101,7 @@ function render_org_conversion_audit() {
       const cohortMonth = orgCreatedAt ? Utilities.formatDate(orgCreatedAt, tz, CONV_CFG.MONTH_FMT) : ''
 
       const info = orgInfoById.get(orgId) || {}
+      const appOrgId = CONV_str_(info.appOrgId)
       const trialStart = info.trialStartDate || null
       const trialEnd = info.trialEndDate || null
       const subscriptionStart = info.subscriptionStartDate || null
@@ -121,6 +124,7 @@ function render_org_conversion_audit() {
 
       rows.push([
         orgId,
+        appOrgId,
         orgName,
         orgCreatedAt || '',
         cohortMonth,
@@ -177,9 +181,9 @@ function CONV_getBucket_(map, monthKey) {
   return map.get(monthKey)
 }
 
-function CONV_collectStatsByMonth_(shOrgs, shOrgInfo, tz) {
+function CONV_collectStatsByMonth_(shOrgs, shArrRaw, tz) {
   const orgs = CONV_readSheetObjects_(shOrgs, 1)
-  const orgInfo = CONV_readSheetObjects_(shOrgInfo, 1)
+  const orgInfo = CONV_readSheetObjects_(shArrRaw, CONV_CFG.ARR_RAW_HEADER_ROW)
   const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
   const now = new Date()
   const statsByMonth = new Map()
@@ -292,14 +296,20 @@ function CONV_buildRows_(statsByMonth) {
 function CONV_buildOrgInfoById_(orgInfoRows) {
   const out = new Map()
   ;(orgInfoRows || []).forEach(r => {
-    const orgId = CONV_str_(r.org_id)
-    if (!orgId) return
-    out.set(orgId, {
+    const clerkOrgId = CONV_str_(r.clerk_org_id)
+    const appOrgId = CONV_str_(r.app_org_id)
+    const legacyOrgId = CONV_str_(r.org_id)
+    const payload = {
+      appOrgId: appOrgId || (clerkOrgId ? '' : legacyOrgId),
       trialStartDate: CONV_parseDate_(r.trial_start_date),
       trialEndDate: CONV_parseDate_(r.trial_end_date),
       subscriptionStartDate: CONV_parseDate_(r.subscription_start_date),
       purchaseDate: CONV_parseDate_(r.purchase_date)
-    })
+    }
+
+    if (legacyOrgId) out.set(legacyOrgId, payload)
+    if (clerkOrgId) out.set(clerkOrgId, payload)
+    if (appOrgId) out.set(appOrgId, payload)
   })
   return out
 }

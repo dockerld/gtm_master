@@ -71,7 +71,10 @@ const POSTHOG_RAW_CFG = {
 
   SHEETS: {
     SOURCE_USERS: 'raw_clerk_users',
-    DEST: 'raw_posthog_user_metrics'
+    DEST: 'raw_posthog_user_metrics',
+    DEST_ORGS: 'raw_posthog_orgs',
+    DEST_ORG_SUBSCRIPTIONS: 'raw_posthog_org_subscriptions',
+    DEST_PROMO_REDEMPTIONS: 'promo_redemptions'
   },
 
   SOURCE_HEADERS: {
@@ -307,6 +310,679 @@ function posthog_pull_user_metrics_to_raw() {
   )
 
   return { rows_in: uniqueEmailKeys.length, rows_out: rowsOut.length }
+}
+
+/**
+ * Pull org-level subscription data from PostHog Postgres tables.
+ * Writes overwrite-only sheet: raw_posthog_org_subscriptions
+ */
+function posthog_pull_org_subscriptions_to_raw() {
+  const t0 = new Date()
+  const props = PropertiesService.getScriptProperties()
+
+  const apiKey = props.getProperty('POSTHOG_API_KEY')
+  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+
+  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+  if (!projectId) throw new Error('Missing POSTHOG_PROJECT_ID (or set PROJECT_ID_FALLBACK)')
+
+  const ss = SpreadsheetApp.getActive()
+
+  const rows = posthogQueryOrgSubscriptions_(apiKey, projectId)
+  const sourceTag = 'posthog'
+  const pulledAt = new Date()
+  const stripeSeatsBySubId = posthogBuildStripeSeatsBySubscriptionId_(ss)
+  const stripeDetailsBySubId = posthogBuildStripeSubscriptionDetailsById_(ss)
+
+  const headers = [
+    'id',
+    'app_org_id',
+    'org_id',
+    'stripe_customer_id',
+    'stripe_subscription_id',
+    'status',
+    'owner_user_id',
+    'full_seat_count',
+    'lite_seat_count',
+    'billing_interval',
+    'current_period_start',
+    'current_period_end',
+    'cancel_at_period_end',
+    'trial_started_at',
+    'trial_ends_at',
+    'has_used_trial',
+    'created_at',
+    'updated_at',
+    'is_active',
+    'is_canceled',
+    'stripe_interval',
+    'stripe_interval_count',
+    'stripe_amount',
+    'stripe_amount_yearly',
+    'stripe_discount_percent_all',
+    'stripe_discount_amount_off_all',
+    'stripe_discount_duration_all',
+    'stripe_promo_code_all',
+    'stripe_promo_code',
+    'pulled_at'
+  ]
+
+  const rowsOut = (rows || []).map(r => {
+    const stripeSubscriptionId = String(r && r[3] != null ? r[3] : '')
+    const status = String(r && r[4] != null ? r[4] : '').toLowerCase()
+    let fullSeatCount = posthogToNumOrZero_(r && r[6])
+    const liteSeatCount = posthogToNumOrZero_(r && r[7])
+    const stripeMeta = stripeSubscriptionId ? (stripeDetailsBySubId.get(stripeSubscriptionId) || {}) : {}
+
+    // Some PostHog org_subscriptions schemas omit seat fields;
+    // in that case, use Stripe quantity_total as best-effort full seats.
+    if (fullSeatCount <= 0 && liteSeatCount <= 0 && stripeSubscriptionId && stripeSeatsBySubId.has(stripeSubscriptionId)) {
+      fullSeatCount = stripeSeatsBySubId.get(stripeSubscriptionId) || 0
+    }
+
+    return [
+      String(r && r[0] != null ? r[0] : ''),
+      String(r && r[1] != null ? r[1] : ''),
+      String(r && r[1] != null ? r[1] : ''),
+      String(r && r[2] != null ? r[2] : ''),
+      stripeSubscriptionId,
+      String(r && r[4] != null ? r[4] : ''),
+      String(r && r[5] != null ? r[5] : ''),
+      fullSeatCount,
+      liteSeatCount,
+      String(r && r[8] != null ? r[8] : ''),
+      String(r && r[9] != null ? r[9] : ''),
+      String(r && r[10] != null ? r[10] : ''),
+      String(r && r[11] != null ? r[11] : ''),
+      String(r && r[12] != null ? r[12] : ''),
+      String(r && r[13] != null ? r[13] : ''),
+      String(r && r[14] != null ? r[14] : ''),
+      String(r && r[15] != null ? r[15] : ''),
+      String(r && r[16] != null ? r[16] : ''),
+      status === 'active',
+      status === 'canceled',
+      String(stripeMeta.interval || ''),
+      posthogToNumOrZero_(stripeMeta.interval_count),
+      posthogToNumOrZero_(stripeMeta.amount),
+      posthogToNumOrZero_(stripeMeta.amount_yearly),
+      String(stripeMeta.discount_percent_all || ''),
+      String(stripeMeta.discount_amount_off_all || ''),
+      String(stripeMeta.discount_duration_all || ''),
+      String(stripeMeta.promo_code_all || ''),
+      String(stripeMeta.promo_code || ''),
+      pulledAt
+    ]
+  })
+
+  const dest = getOrCreateSheetSafe_(ss, POSTHOG_RAW_CFG.SHEETS.DEST_ORG_SUBSCRIPTIONS)
+  posthogOverwriteSheet_(dest, headers, rowsOut)
+
+  posthogWriteSyncLogSafe_(
+    'posthog_pull_org_subscriptions_to_raw',
+    'ok',
+    rowsOut.length,
+    rowsOut.length,
+    (new Date() - t0) / 1000,
+    `source=${sourceTag}`
+  )
+
+  return { rows_in: rowsOut.length, rows_out: rowsOut.length }
+}
+
+/**
+ * Pull org-level metadata (all orgs) and append subscription rollups.
+ * Writes overwrite-only sheet: raw_posthog_orgs
+ */
+function posthog_pull_orgs_to_raw() {
+  const t0 = new Date()
+  const props = PropertiesService.getScriptProperties()
+
+  const apiKey = props.getProperty('POSTHOG_API_KEY')
+  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+
+  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+  if (!projectId) throw new Error('Missing POSTHOG_PROJECT_ID (or set PROJECT_ID_FALLBACK)')
+
+  const ss = SpreadsheetApp.getActive()
+  const rows = posthogQueryOrgs_(apiKey, projectId)
+  const pulledAt = new Date()
+  const subSheet = ss.getSheetByName(POSTHOG_RAW_CFG.SHEETS.DEST_ORG_SUBSCRIPTIONS)
+  const subRows = subSheet ? posthogReadSheetObjectsSafe_(subSheet, 1) : []
+  const subAggByOrgId = posthogBuildOrgSubAggByOrgId_(subRows)
+
+  const headers = [
+    'app_org_id',
+    'org_id',
+    'org_name',
+    'org_status',
+    'billing_email',
+    'owner_user_id',
+    'created_at',
+    'updated_at',
+    'subscription_count',
+    'latest_subscription_id',
+    'latest_subscription_status',
+    'latest_subscription_updated_at',
+    'active_subscription_count',
+    'latest_active_subscription_id',
+    'latest_active_subscription_updated_at',
+    'pulled_at'
+  ]
+
+  const seen = new Set()
+  const orgMetaById = new Map()
+  ;(rows || []).forEach(r => {
+    const orgId = String(r && r[0] != null ? r[0] : '').trim()
+    if (!orgId) return
+    seen.add(orgId)
+
+    const orgName = String(r && r[1] != null ? r[1] : '')
+    const orgStatus = String(r && r[2] != null ? r[2] : '').toLowerCase().trim()
+    const ownerUserId = String(r && r[3] != null ? r[3] : '')
+    const billingEmail = String(r && r[4] != null ? r[4] : '')
+    const createdAt = String(r && r[5] != null ? r[5] : '')
+    const updatedAt = String(r && r[6] != null ? r[6] : '')
+    const subSortAt = String(r && r[7] != null ? r[7] : '')
+
+    if (!orgMetaById.has(orgId)) {
+      orgMetaById.set(orgId, {
+        org_name: orgName,
+        org_status: orgStatus,
+        owner_user_id: ownerUserId,
+        billing_email: billingEmail,
+        created_at: createdAt,
+        updated_at: updatedAt,
+        _sort_at: subSortAt
+      })
+      return
+    }
+
+    const cur = orgMetaById.get(orgId)
+    if (!cur.org_name && orgName) cur.org_name = orgName
+    if (!cur.created_at && createdAt) cur.created_at = createdAt
+    if (!cur.updated_at && updatedAt) cur.updated_at = updatedAt
+
+    const curScore = posthogOrgStatusRank_(cur.org_status)
+    const newScore = posthogOrgStatusRank_(orgStatus)
+    const curTs = posthogIsoToMs_(cur._sort_at)
+    const newTs = posthogIsoToMs_(subSortAt)
+    if (newScore > curScore || (newScore === curScore && newTs >= curTs)) {
+      cur.org_status = orgStatus || cur.org_status
+      cur.owner_user_id = ownerUserId || cur.owner_user_id
+      cur.billing_email = billingEmail || cur.billing_email
+      cur._sort_at = subSortAt || cur._sort_at
+    }
+  })
+
+  const rowsOut = []
+  orgMetaById.forEach((meta, orgId) => {
+    const agg = subAggByOrgId.get(orgId) || posthogEmptyOrgSubAgg_()
+    rowsOut.push([
+      orgId,
+      orgId,
+      String(meta.org_name || ''),
+      String(meta.org_status || ''),
+      String(meta.billing_email || ''),
+      String(meta.owner_user_id || ''),
+      String(meta.created_at || ''),
+      String(meta.updated_at || ''),
+      agg.subscription_count,
+      agg.latest_subscription_id,
+      agg.latest_subscription_status,
+      agg.latest_subscription_updated_at,
+      agg.active_subscription_count,
+      agg.latest_active_subscription_id,
+      agg.latest_active_subscription_updated_at,
+      pulledAt
+    ])
+  })
+
+  subAggByOrgId.forEach((agg, orgId) => {
+    if (!orgId || seen.has(orgId)) return
+    rowsOut.push([
+      orgId,
+      orgId,
+      '',
+      '',
+      '',
+      '',
+      '',
+      '',
+      agg.subscription_count,
+      agg.latest_subscription_id,
+      agg.latest_subscription_status,
+      agg.latest_subscription_updated_at,
+      agg.active_subscription_count,
+      agg.latest_active_subscription_id,
+      agg.latest_active_subscription_updated_at,
+      pulledAt
+    ])
+  })
+
+  const dest = getOrCreateSheetSafe_(ss, POSTHOG_RAW_CFG.SHEETS.DEST_ORGS)
+  posthogOverwriteSheet_(dest, headers, rowsOut)
+
+  posthogWriteSyncLogSafe_(
+    'posthog_pull_orgs_to_raw',
+    'ok',
+    rowsOut.length,
+    rowsOut.length,
+    (new Date() - t0) / 1000,
+    ''
+  )
+
+  return { rows_in: rowsOut.length, rows_out: rowsOut.length }
+}
+
+/**
+ * Pull org-level promo redemption data from PostHog Postgres tables.
+ * Writes append-only sheet: promo_redemptions
+ */
+function posthog_pull_promo_redemptions_to_raw() {
+  const t0 = new Date()
+  const props = PropertiesService.getScriptProperties()
+
+  const apiKey = props.getProperty('POSTHOG_API_KEY')
+  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+
+  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+  if (!projectId) throw new Error('Missing POSTHOG_PROJECT_ID (or set PROJECT_ID_FALLBACK)')
+
+  const ss = SpreadsheetApp.getActive()
+  const pulledAt = new Date()
+  const inAppRows = posthogBuildInAppPromoRows_(posthogQueryPromoRedemptions_(apiKey, projectId), pulledAt)
+  const stripeRows = posthogBuildStripePromoRows_(ss, pulledAt)
+  const allRows = inAppRows.concat(stripeRows)
+
+  const headers = posthogPromoRedemptionHeaders_()
+  const dest = getOrCreateSheetSafe_(ss, POSTHOG_RAW_CFG.SHEETS.DEST_PROMO_REDEMPTIONS)
+  const upsert = posthogUpsertPromoRedemptions_(dest, headers, allRows)
+
+  posthogWriteSyncLogSafe_(
+    'posthog_pull_promo_redemptions_to_raw',
+    'ok',
+    allRows.length,
+    upsert.inserted + upsert.updated,
+    (new Date() - t0) / 1000,
+    `in_app=${inAppRows.length} stripe=${stripeRows.length} inserted=${upsert.inserted} updated=${upsert.updated}`
+  )
+
+  return { rows_in: allRows.length, rows_out: upsert.inserted + upsert.updated }
+}
+
+function posthogPromoRedemptionHeaders_() {
+  return [
+    'source_key',
+    'redemption_location',
+    'id',
+    'app_org_id',
+    'org_id',
+    'stripe_subscription_id',
+    'stripe_customer_id',
+    'redeemed_at',
+    'promo_code',
+    'promo_name',
+    'trial_days',
+    'discount_percent',
+    'discount_duration',
+    'discount_duration_months',
+    'discount_start_at',
+    'discount_end_at',
+    'promo_type',
+    'pulled_at'
+  ]
+}
+
+function posthogBuildInAppPromoRows_(rows, pulledAt) {
+  return (rows || []).map(r => {
+    const id = String(r && r[0] != null ? r[0] : '')
+    const orgId = String(r && r[1] != null ? r[1] : '')
+    const redeemedAt = String(r && r[2] != null ? r[2] : '')
+    const promoCode = String(r && r[3] != null ? r[3] : '')
+    const promoName = String(r && r[4] != null ? r[4] : '')
+    const trialDays = posthogToNumOrZero_(r && r[5])
+    const promoType = String(r && r[6] != null ? r[6] : '')
+    const sourceKey = posthogBuildPromoSourceKey_({
+      location: 'in_app',
+      id,
+      orgId,
+      redeemedAt,
+      promoCode
+    })
+    return [
+      sourceKey,
+      'in_app',
+      id,
+      orgId,
+      orgId,
+      '',
+      '',
+      redeemedAt,
+      promoCode,
+      promoName,
+      trialDays,
+      '',
+      '',
+      '',
+      '',
+      '',
+      promoType,
+      pulledAt
+    ]
+  })
+}
+
+function posthogBuildStripePromoRows_(ss, pulledAt) {
+  const shStripe = ss.getSheetByName('raw_stripe_subscriptions')
+  if (!shStripe) return []
+
+  const stripeRows = posthogReadSheetObjectsSafe_(shStripe, 1)
+  const orgBySubId = posthogBuildOrgIdBySubscriptionFromCanon_(ss)
+  const orgByCustomerId = posthogBuildOrgIdByCustomerFromCanon_(ss)
+  const orgBySubIdFromPosthog = posthogBuildOrgIdBySubscriptionFromPosthogOrgSubs_(ss)
+  const out = []
+
+  ;(stripeRows || []).forEach(r => {
+    const subId = String(r.stripe_subscription_id || r.subscription_id || r.id || '').trim()
+    if (!subId) return
+    const customerId = String(r.stripe_customer_id || r.customer_id || '').trim()
+    const metadataOrgId = posthogExtractOrgIdFromStripeMetadata_(r.metadata_json)
+    const mappedOrgId =
+      String(metadataOrgId || '').trim() ||
+      String(orgBySubId.get(subId) || '').trim() ||
+      String(orgBySubIdFromPosthog.get(subId) || '').trim() ||
+      String(orgByCustomerId.get(customerId) || '').trim()
+
+    const codeAll = posthogCsvList_(r.promo_code_all)
+    const startAll = posthogCsvList_(r.discount_start_at_all)
+    const endAll = posthogCsvList_(r.discount_end_at_all)
+    const pctAll = posthogCsvList_(r.discount_percent_all)
+    const amtAll = posthogCsvList_(r.discount_amount_off_all)
+    const durationAll = posthogCsvList_(r.discount_duration_all)
+    const durationMonthsAll = posthogCsvList_(r.discount_duration_months_all)
+    const promoSingle = String(r.promo_code || '').trim()
+    const discountCount = posthogToNumOrZero_(r.discount_count)
+
+    const maxN = Math.max(
+      codeAll.length,
+      startAll.length,
+      endAll.length,
+      pctAll.length,
+      amtAll.length,
+      durationAll.length,
+      durationMonthsAll.length,
+      discountCount
+    )
+
+    if (maxN <= 0 && !promoSingle) return
+
+    const rowCount = Math.max(1, maxN)
+    for (let i = 0; i < rowCount; i++) {
+      const promoCode = String(codeAll[i] || promoSingle || '').trim()
+      const redeemedAt =
+        String(startAll[i] || '').trim() ||
+        String(r.discount_start_at || '').trim() ||
+        String(r.first_payment_at || '').trim() ||
+        String(r.created_at || '').trim()
+      const endAt = String(endAll[i] || '').trim() || String(r.discount_end_at || '').trim()
+      const pct = posthogToNumOrZero_(pctAll[i] !== undefined ? pctAll[i] : r.discount_percent)
+      const amt = posthogToNumOrZero_(amtAll[i] !== undefined ? amtAll[i] : r.discount_amount_off)
+      const dur = String(durationAll[i] || r.discount_duration || '').trim()
+      const durMonths = posthogToNumOrZero_(durationMonthsAll[i] !== undefined ? durationMonthsAll[i] : r.discount_duration_months)
+      const promoName = promoCode
+      const promoType = 'stripe_discount'
+
+      // If no promo code and no discount signal on this slot, skip.
+      if (!promoCode && pct <= 0 && amt <= 0 && !dur && !durMonths) continue
+
+      const sourceKey = posthogBuildPromoSourceKey_({
+        location: 'stripe',
+        subId,
+        promoCode: promoCode || '__discount__',
+        redeemedAt,
+        slot: i + 1
+      })
+
+      out.push([
+        sourceKey,
+        'stripe',
+        '',
+        mappedOrgId,
+        mappedOrgId,
+        subId,
+        customerId,
+        redeemedAt,
+        promoCode,
+        promoName,
+        '',
+        pct > 0 ? pct : '',
+        dur,
+        durMonths > 0 ? durMonths : '',
+        redeemedAt,
+        endAt,
+        promoType,
+        pulledAt
+      ])
+    }
+  })
+
+  return out
+}
+
+function posthogBuildPromoSourceKey_(parts) {
+  const p = parts || {}
+  const location = String(p.location || '').trim()
+  if (location === 'in_app') {
+    const id = String(p.id || '').trim()
+    if (id) return `in_app:${id}`
+    return `in_app:${String(p.orgId || '').trim()}:${String(p.promoCode || '').trim()}:${String(p.redeemedAt || '').trim()}`
+  }
+  if (location === 'stripe') {
+    return `stripe:${String(p.subId || '').trim()}:${String(p.promoCode || '').trim()}:${String(p.redeemedAt || '').trim()}:slot${String(p.slot || 1)}`
+  }
+  return `${location}:${String(p.id || '').trim()}`
+}
+
+function posthogAppendUniquePromoRedemptions_(sheet, headers, rows) {
+  const existingHeaders = posthogEnsureSheetHeaders_(sheet, headers)
+  const keyIdx = existingHeaders.findIndex(h => String(h || '').trim().toLowerCase() === 'source_key')
+  if (keyIdx < 0) throw new Error('promo_redemptions missing source_key header')
+
+  const existing = new Set()
+  const lastRow = sheet.getLastRow()
+  if (lastRow >= 2) {
+    const vals = sheet.getRange(2, keyIdx + 1, lastRow - 1, 1).getValues()
+    vals.forEach(v => {
+      const key = String(v && v[0] != null ? v[0] : '').trim()
+      if (key) existing.add(key)
+    })
+  }
+
+  const toAppend = []
+  ;(rows || []).forEach(r => {
+    const key = String(r && r[0] != null ? r[0] : '').trim()
+    if (!key || existing.has(key)) return
+    existing.add(key)
+    toAppend.push(r)
+  })
+
+  if (!toAppend.length) return 0
+
+  const startRow = Math.max(2, sheet.getLastRow() + 1)
+  posthogBatchSetValuesSafe_(sheet, startRow, 1, toAppend, POSTHOG_RAW_CFG.WRITE_CHUNK || 5000)
+  return toAppend.length
+}
+
+function posthogUpsertPromoRedemptions_(sheet, headers, rows) {
+  const existingHeaders = posthogEnsureSheetHeaders_(sheet, headers)
+  const keyIdx = existingHeaders.findIndex(h => String(h || '').trim().toLowerCase() === 'source_key')
+  if (keyIdx < 0) throw new Error('promo_redemptions missing source_key header')
+
+  const keyToRow = new Map()
+  const lastRow = sheet.getLastRow()
+  if (lastRow >= 2) {
+    const vals = sheet.getRange(2, keyIdx + 1, lastRow - 1, 1).getValues()
+    vals.forEach((v, i) => {
+      const key = String(v && v[0] != null ? v[0] : '').trim()
+      if (!key) return
+      keyToRow.set(key, i + 2)
+    })
+  }
+
+  const toAppend = []
+  const toUpdate = []
+  ;(rows || []).forEach(r => {
+    const key = String(r && r[0] != null ? r[0] : '').trim()
+    if (!key) return
+    const rowNum = keyToRow.get(key)
+    if (rowNum) {
+      toUpdate.push({ rowNum, row: r })
+    } else {
+      keyToRow.set(key, -1) // prevent duplicate appends in same batch
+      toAppend.push(r)
+    }
+  })
+
+  // Update existing rows (full-row overwrite to keep schema aligned).
+  toUpdate.forEach(u => {
+    sheet.getRange(u.rowNum, 1, 1, u.row.length).setValues([u.row])
+  })
+
+  if (toAppend.length) {
+    const startRow = Math.max(2, sheet.getLastRow() + 1)
+    posthogBatchSetValuesSafe_(sheet, startRow, 1, toAppend, POSTHOG_RAW_CFG.WRITE_CHUNK || 5000)
+  }
+
+  return { inserted: toAppend.length, updated: toUpdate.length }
+}
+
+function posthogEnsureSheetHeaders_(sheet, headers) {
+  const needed = headers || []
+  if (!needed.length) return []
+
+  const lastRow = sheet.getLastRow()
+  const lastCol = Math.max(sheet.getLastColumn(), needed.length, 1)
+  const existing = lastRow >= 1
+    ? sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim())
+    : []
+
+  let changed = false
+  const out = existing.slice()
+  needed.forEach(h => {
+    if (out.indexOf(h) >= 0) return
+    out.push(h)
+    changed = true
+  })
+
+  if (out.length < needed.length) {
+    while (out.length < needed.length) out.push('')
+    changed = true
+  }
+
+  if (!lastRow) changed = true
+  if (changed) {
+    sheet.getRange(1, 1, 1, out.length).setValues([out])
+  }
+  return out.length ? out : needed.slice()
+}
+
+function posthogBatchSetValuesSafe_(sheet, startRow, startCol, values, chunkSize) {
+  const size = Math.max(1, Number(chunkSize || 5000) || 5000)
+  for (let i = 0; i < values.length; i += size) {
+    const chunk = values.slice(i, i + size)
+    sheet.getRange(startRow + i, startCol, chunk.length, chunk[0].length).setValues(chunk)
+  }
+}
+
+function posthogBuildOrgIdBySubscriptionFromCanon_(ss) {
+  const out = new Map()
+  const sh = ss.getSheetByName('canon_orgs')
+  if (!sh) return out
+  const rows = posthogReadSheetObjectsSafe_(sh, 1)
+  ;(rows || []).forEach(r => {
+    const orgId = String(r.app_org_id || r.org_id || '').trim()
+    if (!orgId) return
+    posthogCsvList_(r.stripe_subscription_ids).forEach(subId => {
+      const sid = String(subId || '').trim()
+      if (!sid || out.has(sid)) return
+      out.set(sid, orgId)
+    })
+  })
+  return out
+}
+
+function posthogBuildOrgIdByCustomerFromCanon_(ss) {
+  const out = new Map()
+  const sh = ss.getSheetByName('canon_orgs')
+  if (!sh) return out
+  const rows = posthogReadSheetObjectsSafe_(sh, 1)
+  ;(rows || []).forEach(r => {
+    const orgId = String(r.app_org_id || r.org_id || '').trim()
+    if (!orgId) return
+    posthogCsvList_(r.stripe_customer_ids).forEach(customerId => {
+      const cid = String(customerId || '').trim()
+      if (!cid || out.has(cid)) return
+      out.set(cid, orgId)
+    })
+    const billingCustomer = String(r.billing_customer_id || '').trim()
+    if (billingCustomer && !out.has(billingCustomer)) out.set(billingCustomer, orgId)
+  })
+  return out
+}
+
+function posthogBuildOrgIdBySubscriptionFromPosthogOrgSubs_(ss) {
+  const out = new Map()
+  const sh = ss.getSheetByName(POSTHOG_RAW_CFG.SHEETS.DEST_ORG_SUBSCRIPTIONS)
+  if (!sh) return out
+  const rows = posthogReadSheetObjectsSafe_(sh, 1)
+  ;(rows || []).forEach(r => {
+    const subId = String(r.stripe_subscription_id || r.subscription_id || r.id || '').trim()
+    const orgId = String(r.app_org_id || r.org_id || '').trim()
+    if (!subId || !orgId || out.has(subId)) return
+    out.set(subId, orgId)
+  })
+  return out
+}
+
+function posthogBuildStripeSubscriptionDetailsById_(ss) {
+  const out = new Map()
+  const sh = ss.getSheetByName('raw_stripe_subscriptions')
+  if (!sh) return out
+  const rows = posthogReadSheetObjectsSafe_(sh, 1)
+  ;(rows || []).forEach(r => {
+    const subId = String(r.stripe_subscription_id || r.subscription_id || r.id || '').trim()
+    if (!subId) return
+    out.set(subId, {
+      interval: r.interval,
+      interval_count: r.interval_count,
+      amount: r.amount,
+      amount_yearly: r.amount_yearly,
+      discount_percent_all: r.discount_percent_all,
+      discount_amount_off_all: r.discount_amount_off_all,
+      discount_duration_all: r.discount_duration_all,
+      promo_code_all: r.promo_code_all,
+      promo_code: r.promo_code
+    })
+  })
+  return out
+}
+
+function posthogExtractOrgIdFromStripeMetadata_(metadataRaw) {
+  const raw = String(metadataRaw || '').trim()
+  if (!raw) return ''
+  try {
+    const obj = JSON.parse(raw)
+    if (!obj || typeof obj !== 'object') return ''
+    return String(obj.orgId || obj.org_id || '').trim()
+  } catch (err) {
+    return ''
+  }
+}
+
+function posthogCsvList_(v) {
+  const s = String(v == null ? '' : v).trim()
+  if (!s) return []
+  return s.split(',').map(x => String(x || '').trim()).filter(Boolean)
 }
 
 /* =========================
@@ -602,6 +1278,393 @@ GROUP BY email_key
 ORDER BY active_days DESC
 LIMIT 50000
   `.trim()
+}
+
+function posthogQueryOrgSubscriptions_(apiKey, projectId) {
+  const tables = [
+    'postgres.org_subscriptions',
+    'postgres.org_subscription'
+  ]
+
+  let lastErr = null
+  for (const tableExpr of tables) {
+    // First try the richer schema.
+    let sql = posthogBuildHogQL_orgSubscriptions_(tableExpr)
+    let label = `orgSubscriptions rich [${tableExpr}]`
+    try {
+      return posthogRunQuery_(apiKey, projectId, sql, label)
+    } catch (err) {
+      lastErr = err
+    }
+
+    // Then try minimal shape for workspaces with fewer columns.
+    sql = posthogBuildHogQL_orgSubscriptionsMinimal_(tableExpr)
+    label = `orgSubscriptions minimal [${tableExpr}]`
+    try {
+      return posthogRunQuery_(apiKey, projectId, sql, label)
+    } catch (err) {
+      lastErr = err
+    }
+  }
+
+  throw (lastErr || new Error('Could not query org_subscriptions tables'))
+}
+
+function posthogQueryPromoRedemptions_(apiKey, projectId) {
+  let lastErr = null
+
+  let sql = posthogBuildHogQL_promoRedemptions_()
+  try {
+    return posthogRunQuery_(apiKey, projectId, sql, 'promoRedemptions rich')
+  } catch (err) {
+    lastErr = err
+  }
+
+  sql = posthogBuildHogQL_promoRedemptionsMinimal_()
+  try {
+    return posthogRunQuery_(apiKey, projectId, sql, 'promoRedemptions minimal')
+  } catch (err) {
+    lastErr = err
+  }
+
+  throw (lastErr || new Error('Could not query promo_redemptions table'))
+}
+
+function posthogQueryOrgs_(apiKey, projectId) {
+  const tableCandidates = ['postgres.orgs', 'postgres.organizations']
+  let lastErr = null
+  for (const tableExpr of tableCandidates) {
+    let sql = posthogBuildHogQL_orgsJoined_(tableExpr)
+    try {
+      return posthogRunQuery_(apiKey, projectId, sql, `orgs joined [${tableExpr}]`)
+    } catch (err) {
+      lastErr = err
+    }
+
+    sql = posthogBuildHogQL_orgsCore_(tableExpr)
+    try {
+      return posthogRunQuery_(apiKey, projectId, sql, `orgs core [${tableExpr}]`)
+    } catch (err) {
+      lastErr = err
+    }
+
+    sql = posthogBuildHogQL_orgsMinimal_(tableExpr)
+    try {
+      return posthogRunQuery_(apiKey, projectId, sql, `orgs minimal [${tableExpr}]`)
+    } catch (err) {
+      lastErr = err
+    }
+
+    sql = posthogBuildHogQL_orgsIdOnly_(tableExpr)
+    try {
+      return posthogRunQuery_(apiKey, projectId, sql, `orgs id_only [${tableExpr}]`)
+    } catch (err) {
+      lastErr = err
+    }
+  }
+
+  throw (lastErr || new Error('Could not query orgs table'))
+}
+
+function posthogBuildHogQL_orgSubscriptions_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing org_subscriptions table')
+
+  return `
+SELECT
+  toString(os.id) AS id,
+  toString(os.org_id) AS org_id,
+  toString(os.stripe_customer_id) AS stripe_customer_id,
+  toString(os.stripe_subscription_id) AS stripe_subscription_id,
+  toString(os.status) AS status,
+  toString(os.owner_user_id) AS owner_user_id,
+  toFloat(os.full_seat_count) AS full_seat_count,
+  toFloat(os.lite_seat_count) AS lite_seat_count,
+  toString(os.billing_interval) AS billing_interval,
+  toString(os.current_period_start) AS current_period_start,
+  toString(os.current_period_end) AS current_period_end,
+  toString(os.cancel_at_period_end) AS cancel_at_period_end,
+  toString(os.trial_started_at) AS trial_started_at,
+  toString(os.trial_ends_at) AS trial_ends_at,
+  toString(os.has_used_trial) AS has_used_trial,
+  toString(os.created_at) AS created_at,
+  toString(os.updated_at) AS updated_at
+FROM ${t} AS os
+WHERE length(coalesce(toString(os.stripe_subscription_id), '')) > 0
+ORDER BY os.updated_at DESC
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_orgSubscriptionsMinimal_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing org_subscriptions table')
+
+  return `
+SELECT
+  toString(os.id) AS id,
+  toString(os.org_id) AS org_id,
+  '' AS stripe_customer_id,
+  toString(os.stripe_subscription_id) AS stripe_subscription_id,
+  '' AS status,
+  '' AS owner_user_id,
+  0 AS full_seat_count,
+  0 AS lite_seat_count,
+  '' AS billing_interval,
+  '' AS current_period_start,
+  '' AS current_period_end,
+  '' AS cancel_at_period_end,
+  '' AS trial_started_at,
+  '' AS trial_ends_at,
+  '' AS has_used_trial,
+  '' AS created_at,
+  '' AS updated_at
+FROM ${t} AS os
+WHERE length(coalesce(toString(os.stripe_subscription_id), '')) > 0
+ORDER BY os.org_id, os.stripe_subscription_id
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_orgsMinimal_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing orgs table')
+  return `
+SELECT
+  toString(o.id) AS org_id,
+  toString(o.name) AS org_name,
+  '' AS org_status,
+  '' AS billing_email,
+  '' AS owner_user_id,
+  toString(o.created_at) AS created_at,
+  toString(o.updated_at) AS updated_at
+FROM ${t} AS o
+ORDER BY o.id
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_orgsCore_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing orgs table')
+  return `
+SELECT
+  toString(o.id) AS org_id,
+  toString(o.name) AS org_name,
+  '' AS org_status,
+  '' AS billing_email,
+  '' AS owner_user_id,
+  toString(o.created_at) AS created_at,
+  toString(o.updated_at) AS updated_at
+FROM ${t} AS o
+ORDER BY o.updated_at DESC
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_orgsIdOnly_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing orgs table')
+  return `
+SELECT
+  toString(o.id) AS org_id,
+  '' AS org_name,
+  '' AS org_status,
+  '' AS billing_email,
+  '' AS owner_user_id,
+  '' AS created_at,
+  '' AS updated_at
+FROM ${t} AS o
+ORDER BY o.id
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_orgsJoined_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing orgs table')
+  return `
+SELECT
+  toString(o.id) AS org_id,
+  toString(o.name) AS org_name,
+  toString(os.status) AS org_status,
+  toString(os.owner_user_id) AS owner_user_id,
+  toString(u.email) AS billing_email,
+  toString(o.created_at) AS created_at,
+  toString(o.updated_at) AS updated_at,
+  toString(coalesce(os.current_period_end, os.updated_at, os.created_at)) AS sub_sort_at
+FROM ${t} AS o
+LEFT JOIN postgres.org_subscriptions AS os
+  ON toString(os.org_id) = toString(o.id)
+LEFT JOIN postgres.users AS u
+  ON toString(u.id) = toString(os.owner_user_id)
+ORDER BY o.created_at DESC
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_promoRedemptions_() {
+  return `
+SELECT
+  toString(r.id) AS id,
+  toString(r.org_id) AS org_id,
+  toString(r.redeemed_at) AS redeemed_at,
+  toString(p.code) AS promo_code,
+  toString(p.name) AS promo_name,
+  toString(p.trial_days) AS trial_days,
+  toString(p.type) AS promo_type
+FROM postgres.promo_redemptions AS r
+LEFT JOIN postgres.promo_codes AS p
+  ON toString(r.promo_code_id) = toString(p.id)
+ORDER BY r.redeemed_at DESC
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_promoRedemptionsMinimal_() {
+  return `
+SELECT
+  toString(r.id) AS id,
+  toString(r.org_id) AS org_id,
+  toString(r.redeemed_at) AS redeemed_at,
+  toString(r.promo_code_id) AS promo_code,
+  '' AS promo_name,
+  0 AS trial_days,
+  '' AS promo_type
+FROM postgres.promo_redemptions AS r
+ORDER BY r.redeemed_at DESC
+LIMIT 300000
+  `.trim()
+}
+
+function posthogBuildHogQL_orgSubscriptionsFromStripe_(tableExpr) {
+  const t = String(tableExpr || '').trim()
+  if (!t) throw new Error('Missing Stripe subscription table')
+
+  return `
+SELECT DISTINCT
+  toString(ss.id) AS id,
+  JSONExtractString(toString(ss.metadata), 'orgId') AS org_id,
+  '' AS stripe_customer_id,
+  toString(ss.id) AS stripe_subscription_id,
+  '' AS status,
+  '' AS owner_user_id,
+  0 AS full_seat_count,
+  0 AS lite_seat_count,
+  '' AS billing_interval,
+  '' AS current_period_start,
+  '' AS current_period_end,
+  '' AS cancel_at_period_end,
+  '' AS trial_started_at,
+  '' AS trial_ends_at,
+  '' AS has_used_trial,
+  '' AS created_at,
+  '' AS updated_at
+FROM ${t} AS ss
+WHERE length(coalesce(JSONExtractString(toString(ss.metadata), 'orgId'), '')) > 0
+ORDER BY org_id, stripe_subscription_id
+LIMIT 300000
+  `.trim()
+}
+
+function posthogReadSheetObjectsSafe_(sheet, headerRow) {
+  const lastRow = sheet.getLastRow()
+  const lastCol = sheet.getLastColumn()
+  if (lastRow < headerRow + 1 || lastCol < 1) return []
+
+  const header = sheet
+    .getRange(headerRow, 1, 1, lastCol)
+    .getValues()[0]
+    .map(h => String(h || '').trim().toLowerCase().replace(/\s+/g, '_'))
+
+  const data = sheet.getRange(headerRow + 1, 1, lastRow - headerRow, lastCol).getValues()
+  return data.map(r => {
+    const obj = {}
+    header.forEach((h, i) => {
+      if (!h) return
+      obj[h] = r[i]
+    })
+    return obj
+  })
+}
+
+function posthogBuildStripeSeatsBySubscriptionId_(ss) {
+  const out = new Map()
+  const sh = ss.getSheetByName('raw_stripe_subscriptions')
+  if (!sh) return out
+  const rows = posthogReadSheetObjectsSafe_(sh, 1)
+  ;(rows || []).forEach(r => {
+    const subId = String(r.stripe_subscription_id || r.subscription_id || r.id || '').trim()
+    if (!subId) return
+    const qty = posthogToNumOrZero_(r.quantity_total)
+    if (!out.has(subId) || qty > (out.get(subId) || 0)) out.set(subId, qty)
+  })
+  return out
+}
+
+function posthogToNumOrZero_(v) {
+  const n = Number(v)
+  return isFinite(n) ? n : 0
+}
+
+function posthogEmptyOrgSubAgg_() {
+  return {
+    subscription_count: 0,
+    latest_subscription_id: '',
+    latest_subscription_status: '',
+    latest_subscription_updated_at: '',
+    active_subscription_count: 0,
+    latest_active_subscription_id: '',
+    latest_active_subscription_updated_at: ''
+  }
+}
+
+function posthogBuildOrgSubAggByOrgId_(subRows) {
+  const out = new Map()
+  ;(subRows || []).forEach(r => {
+    const orgId = String(r.app_org_id || r.org_id || '').trim()
+    const subId = String(r.stripe_subscription_id || r.subscription_id || r.id || '').trim()
+    if (!orgId || !subId) return
+    const status = String(r.status || '').toLowerCase().trim()
+    const updatedAt = String(r.updated_at || r.created_at || '').trim()
+    const ts = posthogIsoToMs_(updatedAt)
+
+    if (!out.has(orgId)) out.set(orgId, posthogEmptyOrgSubAgg_())
+    const agg = out.get(orgId)
+    agg.subscription_count += 1
+
+    const latestTs = posthogIsoToMs_(agg.latest_subscription_updated_at)
+    if (!agg.latest_subscription_id || ts >= latestTs) {
+      agg.latest_subscription_id = subId
+      agg.latest_subscription_status = status
+      agg.latest_subscription_updated_at = updatedAt
+    }
+
+    if (status === 'active') {
+      agg.active_subscription_count += 1
+      const latestActiveTs = posthogIsoToMs_(agg.latest_active_subscription_updated_at)
+      if (!agg.latest_active_subscription_id || ts >= latestActiveTs) {
+        agg.latest_active_subscription_id = subId
+        agg.latest_active_subscription_updated_at = updatedAt
+      }
+    }
+  })
+  return out
+}
+
+function posthogIsoToMs_(isoLike) {
+  const s = String(isoLike || '').trim()
+  if (!s) return 0
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? 0 : d.getTime()
+}
+
+function posthogOrgStatusRank_(status) {
+  const s = String(status || '').toLowerCase().trim()
+  if (s === 'active') return 3
+  if (s === 'trialing') return 2
+  if (s === 'canceled') return 1
+  return 0
 }
 
 /* =========================

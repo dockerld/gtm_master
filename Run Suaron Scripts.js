@@ -36,18 +36,21 @@ function run_daily_pipeline() {
 
       { name: 'stripe_pull_subscriptions_to_raw', fn: stripe_pull_subscriptions_to_raw },
       { name: 'posthog_pull_user_metrics_to_raw', fn: posthog_pull_user_metrics_to_raw },
+      { name: 'posthog_pull_org_subscriptions_to_raw', fn: posthog_pull_org_subscriptions_to_raw },
+      { name: 'posthog_pull_orgs_to_raw', fn: posthog_pull_orgs_to_raw },
+      { name: 'posthog_pull_promo_redemptions_to_raw', fn: posthog_pull_promo_redemptions_to_raw },
 
       { name: 'build_canon_orgs',                fn: build_canon_orgs },
       { name: 'build_canon_users',               fn: build_canon_users },
-      { name: 'render_org_info_view',            fn: render_org_info_view },
-
       { name: 'render_arr_raw_data_view',        fn: render_arr_raw_data_view },
       { name: 'write_arr_snapshot',              fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts',      fn: render_arr_waterfall_facts },
+      { name: 'render_arr_subscription_mapping_audit', fn: render_arr_subscription_mapping_audit },
       { name: 'render_paying_users_snapshot',    fn: render_paying_users_snapshot },
 
-      { name: 'render_sauron_view',              fn: render_sauron_view },
+      { name: 'render_org_subscription_info',    fn: render_org_subscription_info },
       { name: 'render_ring_view',                fn: render_ring_view },
+      { name: 'render_all_stats_view',           fn: render_all_stats_view },
 
       { name: 'render_conversion_onboarding_stats', fn: render_conversion_onboarding_stats }
     ]
@@ -99,7 +102,6 @@ function runStepSafe_(name, fn, t0) {
     // 'render_sauron_view',
     // 'syncClerkUsers',
     // 'render_ring_view'
-    // 'render_org_info_view
   ])
 
   try {

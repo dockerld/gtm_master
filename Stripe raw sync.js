@@ -79,10 +79,23 @@ function stripe_pull_subscriptions_to_raw() {
     'amount_yearly',
 
     'discount_percent',
+    'discount_amount_off',
     'discount_duration',
     'discount_duration_months',
+    'discount_start_at',
+    'discount_end_at',
+    'discount_percent_all',
+    'discount_amount_off_all',
+    'discount_duration_all',
+    'discount_duration_months_all',
+    'discount_start_at_all',
+    'discount_end_at_all',
+    'discount_count',
+    'discount_details_json',
+    'discounts_json',
 
     'promo_code',
+    'promo_code_all',
 
     'cancel_at_period_end',
     'canceled_at',
@@ -120,12 +133,10 @@ function stripe_pull_subscriptions_to_raw() {
 
     const discountsArr = stripeNormalizeDiscounts_(sub)
     discountsArr.forEach(d => {
-      const couponId =
-        (d.source && d.source.coupon) ||
-        (d.coupon && (typeof d.coupon === 'string' ? d.coupon : d.coupon.id))
-
+      const couponId = stripeExtractCouponIdFromDiscount_(d)
+      const promoId = stripeExtractPromotionCodeIdFromDiscount_(d)
       if (couponId) couponIds.add(String(couponId))
-      if (d.promotion_code) promoIds.add(String(d.promotion_code))
+      if (promoId) promoIds.add(String(promoId))
     })
   })
 
@@ -232,33 +243,94 @@ function stripe_pull_subscriptions_to_raw() {
       if (pmObj && pmObj.created) paymentMethodCreatedAt = stripeUnixToIso_(pmObj.created)
     }
 
-    // discount fields (use first discount)
+    // discount fields:
+    // - keep single-value columns for backward compatibility (first discount)
+    // - also persist full multi-discount detail in *_all + json columns
     let discountPercent = ''
+    let discountAmountOff = ''
     let discountDuration = ''
     let discountDurationMonths = ''
+    let discountStartAt = ''
+    let discountEndAt = ''
+    const discountPercentAll = []
+    const discountAmountOffAll = []
+    const discountDurationAll = []
+    const discountDurationMonthsAll = []
+    const discountStartAtAll = []
+    const discountEndAtAll = []
+    const discountDetails = []
+    let discountCount = 0
+    let discountDetailsJson = '[]'
+    let discountsJson = '[]'
     let promoCode = ''
+    const promoCodeAll = []
 
     const discountsArr = stripeNormalizeDiscounts_(sub)
     if (discountsArr.length > 0) {
-      const d = discountsArr[0]
+      discountCount = discountsArr.length
 
-      const couponId =
-        (d.source && d.source.coupon) ||
-        (d.coupon && (typeof d.coupon === 'string' ? d.coupon : d.coupon.id))
+      discountsArr.forEach((d, i) => {
+        const couponId = stripeExtractCouponIdFromDiscount_(d)
+        const couponObj = stripeExtractCouponObjectFromDiscount_(d)
 
-      if (couponId && couponMap[String(couponId)]) {
-        const c = couponMap[String(couponId)]
-        if (c.percent_off != null) discountPercent = c.percent_off
-        if (c.duration) discountDuration = c.duration
-        if (c.duration_in_months != null) discountDurationMonths = c.duration_in_months
-      }
+        let pct = ''
+        let amountOff = ''
+        let dur = ''
+        let durMonths = ''
+        const c = (couponId && couponMap[String(couponId)]) || couponObj || null
+        if (c) {
+          if (c.percent_off != null) pct = c.percent_off
+          if (c.amount_off != null) {
+            amountOff = stripeMinorUnitsToMajor_(c.amount_off, c.currency || currency)
+          }
+          if (c.duration) dur = c.duration
+          if (c.duration_in_months != null) durMonths = c.duration_in_months
+        }
 
-      if (d.promotion_code) {
-        const promoId = String(d.promotion_code)
-        const promoObj = promoMap[promoId]
-        if (promoObj && promoObj.code) promoCode = promoObj.code
-        else promoCode = promoId
-      }
+        const startIso = stripeDiscountBoundaryToIso_(d.start)
+        const endIso = stripeDiscountBoundaryToIso_(d.end)
+
+        discountPercentAll.push(pct !== '' ? String(pct) : '')
+        discountAmountOffAll.push(amountOff !== '' ? String(amountOff) : '')
+        discountDurationAll.push(dur ? String(dur) : '')
+        discountDurationMonthsAll.push(durMonths !== '' ? String(durMonths) : '')
+        discountStartAtAll.push(startIso || '')
+        discountEndAtAll.push(endIso || '')
+
+        if (i === 0) {
+          discountPercent = pct
+          discountAmountOff = amountOff
+          discountDuration = dur
+          discountDurationMonths = durMonths
+          discountStartAt = startIso
+          discountEndAt = endIso
+        }
+
+        let promoLabel = ''
+        const promoId = stripeExtractPromotionCodeIdFromDiscount_(d)
+        if (promoId) {
+          const promoObjInline = stripeExtractPromotionCodeObjectFromDiscount_(d)
+          const promoObj = promoObjInline || promoMap[promoId]
+          promoLabel = (promoObj && promoObj.code) ? String(promoObj.code) : String(promoId)
+          if (promoLabel) promoCodeAll.push(String(promoLabel))
+          if (i === 0) promoCode = promoLabel
+        }
+
+        discountDetails.push({
+          index: i + 1,
+          coupon_id: couponId ? String(couponId) : '',
+          percent_off: pct === '' ? '' : Number(pct),
+          amount_off: amountOff === '' ? '' : Number(amountOff),
+          duration: dur || '',
+          duration_in_months: durMonths === '' ? '' : Number(durMonths),
+          start_at: startIso || '',
+          end_at: endIso || '',
+          promotion_code: promoLabel || ''
+        })
+      })
+
+      discountDetailsJson = stripeSafeJson_(discountDetails)
+      discountsJson = stripeSafeJson_(discountsArr)
     }
 
     // metadata trace
@@ -294,10 +366,23 @@ function stripe_pull_subscriptions_to_raw() {
       amountYearly,
 
       discountPercent,
+      discountAmountOff,
       discountDuration,
       discountDurationMonths,
+      discountStartAt,
+      discountEndAt,
+      discountPercentAll.join(', '),
+      discountAmountOffAll.join(', '),
+      discountDurationAll.join(', '),
+      discountDurationMonthsAll.join(', '),
+      discountStartAtAll.join(', '),
+      discountEndAtAll.join(', '),
+      discountCount || 0,
+      discountDetailsJson,
+      discountsJson,
 
       promoCode,
+      promoCodeAll.join(', '),
 
       sub.cancel_at_period_end === true,
       stripeUnixToIso_(sub.canceled_at),
@@ -500,9 +585,63 @@ function stripeFetchAllSubscriptionsExpanded_(apiKey) {
 
 function stripeNormalizeDiscounts_(sub) {
   const out = []
-  if (Array.isArray(sub.discounts)) out.push(...sub.discounts)
+  if (!sub) return out
+
+  const discounts = sub.discounts
+  if (Array.isArray(discounts)) out.push(...discounts)
+  else if (discounts && Array.isArray(discounts.data)) out.push(...discounts.data)
+  else if (discounts && typeof discounts === 'object') {
+    const maybeId = stripeExtractId_(discounts)
+    if (maybeId || discounts.coupon || discounts.source) out.push(discounts)
+  }
+
   if (sub.discount) out.push(sub.discount)
-  return out
+
+  const deduped = []
+  const seen = new Set()
+  out.forEach(d => {
+    if (!d || typeof d !== 'object') return
+    const key = stripeDiscountDedupeKey_(d)
+    if (seen.has(key)) return
+    seen.add(key)
+    deduped.push(d)
+  })
+  return deduped
+}
+
+function stripeExtractCouponIdFromDiscount_(discount) {
+  const d = discount || {}
+  const sourceCoupon = d.source && d.source.coupon
+  return stripeExtractId_(sourceCoupon) || stripeExtractId_(d.coupon)
+}
+
+function stripeExtractCouponObjectFromDiscount_(discount) {
+  const d = discount || {}
+  const sourceCoupon = d.source && d.source.coupon
+  if (sourceCoupon && typeof sourceCoupon === 'object') return sourceCoupon
+  if (d.coupon && typeof d.coupon === 'object') return d.coupon
+  return null
+}
+
+function stripeExtractPromotionCodeIdFromDiscount_(discount) {
+  const d = discount || {}
+  return stripeExtractId_(d.promotion_code)
+}
+
+function stripeExtractPromotionCodeObjectFromDiscount_(discount) {
+  const d = discount || {}
+  if (d.promotion_code && typeof d.promotion_code === 'object') return d.promotion_code
+  return null
+}
+
+function stripeDiscountDedupeKey_(discount) {
+  const id = stripeExtractId_(discount)
+  if (id) return `id:${id}`
+  const couponId = stripeExtractCouponIdFromDiscount_(discount)
+  const promoId = stripeExtractPromotionCodeIdFromDiscount_(discount)
+  const start = strOrBlank_(discount && discount.start)
+  const end = strOrBlank_(discount && discount.end)
+  return `coupon:${couponId}|promo:${promoId}|start:${start}|end:${end}`
 }
 
 function stripeFetchCouponsMap_(apiKey, couponIds) {
@@ -590,6 +729,29 @@ function stripeUnixToIso_(sec) {
   const d = new Date(Number(sec) * 1000)
   if (isNaN(d.getTime())) return ''
   return d.toISOString()
+}
+
+function stripeDiscountBoundaryToIso_(v) {
+  if (v === null || v === undefined || v === '') return ''
+  if (v instanceof Date) return isNaN(v.getTime()) ? '' : v.toISOString()
+
+  const n = Number(v)
+  if (isFinite(n) && n > 0) return stripeUnixToIso_(n)
+
+  const d = new Date(String(v || '').trim())
+  return isNaN(d.getTime()) ? '' : d.toISOString()
+}
+
+function stripeMinorUnitsToMajor_(minorUnits, currency) {
+  const n = Number(minorUnits)
+  if (!isFinite(n)) return ''
+  const c = String(currency || '').trim().toLowerCase()
+  const zeroDecimal = new Set([
+    'bif', 'clp', 'djf', 'gnf', 'jpy', 'kmf', 'krw', 'mga',
+    'pyg', 'rwf', 'ugx', 'vnd', 'vuv', 'xaf', 'xof', 'xpf'
+  ])
+  const value = zeroDecimal.has(c) ? n : (n / 100)
+  return Math.round(value * 100) / 100
 }
 
 function stripeOverwriteSheet_(sheet, headers, rows) {

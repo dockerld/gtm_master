@@ -280,7 +280,13 @@ function lockWrapCompat_(lockName, fn) {
       // preferred: lockWrap(lockName, fn)
       return lockWrap(lockName, fn)
     } catch (e) {
-      // alternate: lockWrap(fn)
+      // Only fallback for legacy lockWrap(fn) signatures.
+      // If the wrapped fn threw, preserve the original error.
+      const msg = String(e && e.message ? e.message : e)
+      const signatureMismatch =
+        msg.indexOf('fn must be a function') >= 0 ||
+        msg.indexOf('lockName') >= 0
+      if (!signatureMismatch) throw e
       return lockWrap(fn)
     }
   }

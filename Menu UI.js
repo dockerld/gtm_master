@@ -17,13 +17,15 @@
  *   run_daily_pipeline()
  *   stripe_pull_subscriptions_to_raw()
  *   posthog_pull_user_metrics_to_raw()
+ *   posthog_pull_orgs_to_raw()
+ *   posthog_pull_org_subscriptions_to_raw()
+ *   posthog_pull_promo_redemptions_to_raw()
  *   clerk_pull_users_to_raw()
  *   clerk_pull_orgs_to_raw()
  *   clerk_pull_memberships_to_raw()
  *   syncClerkUsers()
  *   build_canon_orgs()
  *   build_canon_users()
- *   render_org_info_view()
  *   render_sauron_view()
  *   render_ring_view()
  *   render_arr_raw_data_view()
@@ -43,9 +45,12 @@ function onOpen() {
     .addItem('Run daily pipeline', 'ui_run_daily_pipeline')
     .addSeparator()
     .addItem('Run only PostHog', 'ui_run_only_posthog')
+    .addItem('Resync Promo Redemptions', 'ui_resync_promo_redemptions')
     .addItem('Run only Stripe', 'ui_run_only_stripe')
     .addItem('Run only Clerk', 'ui_run_only_clerk')
     .addItem('Run The Ring only', 'ui_run_only_ring')
+    .addItem('Render Promo Trial Page', 'ui_render_promo_trial_page')
+    .addItem('Render Org Subscription Info', 'ui_render_org_subscription_info')
     .addItem('Render All the Stats', 'ui_render_all_stats')
     .addItem('Publish The Good Stuff', 'ui_publish_the_good_stuff')
     .addItem('Send Ring Weekly Test (Docker)', 'ui_send_ring_weekly_test_docker')
@@ -53,9 +58,7 @@ function onOpen() {
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
-    .addItem('Build Promo Backfill (One-time)', 'ui_build_promo_backfill')
     .addItem('Run Conversion & Onboarding stats', 'ui_run_conversion_onboarding_stats')
-    .addItem('Run Conversion audit', 'ui_run_conversion_audit')
     .addSeparator()
     .addItem('Push UpSale targets to Notion', 'ui_push_upsale_targets_to_notion') // ✅ NEW
     .addToUi()
@@ -71,14 +74,40 @@ function ui_run_daily_pipeline() {
   })
 }
 
+function ui_confirmed_run_daily_pipeline() {
+  const ui = SpreadsheetApp.getUi()
+  const result = ui.alert(
+    'Confirm Resync',
+    'Are you sure you want to resync? This will take 5-10 min to resync everything.',
+    ui.ButtonSet.YES_NO
+  )
+  if (result !== ui.Button.YES) return
+
+  return uiRunWrapped_('ui_confirmed_run_daily_pipeline', () => {
+    run_daily_pipeline()
+  })
+}
+
 function ui_run_only_posthog() {
   return uiRunWrapped_('ui_run_only_posthog', () => {
     runSteps_([
       { name: 'posthog_pull_user_metrics_to_raw', fn: posthog_pull_user_metrics_to_raw },
+      { name: 'posthog_pull_org_subscriptions_to_raw', fn: posthog_pull_org_subscriptions_to_raw },
+      { name: 'posthog_pull_orgs_to_raw', fn: posthog_pull_orgs_to_raw },
+      { name: 'posthog_pull_promo_redemptions_to_raw', fn: posthog_pull_promo_redemptions_to_raw },
+      { name: 'build_canon_orgs', fn: build_canon_orgs },
       { name: 'build_canon_users', fn: build_canon_users },
       { name: 'render_sauron_view', fn: render_sauron_view },
       { name: 'render_ring_view', fn: render_ring_view }
       // { name: 'write_daily_snapshot', fn: write_daily_snapshot }
+    ])
+  })
+}
+
+function ui_resync_promo_redemptions() {
+  return uiRunWrapped_('ui_resync_promo_redemptions', () => {
+    runSteps_([
+      { name: 'posthog_pull_promo_redemptions_to_raw', fn: posthog_pull_promo_redemptions_to_raw }
     ])
   })
 }
@@ -125,6 +154,22 @@ function ui_render_all_stats() {
   })
 }
 
+function ui_render_promo_trial_page() {
+  return uiRunWrapped_('ui_render_promo_trial_page', () => {
+    runSteps_([
+      { name: 'render_promo_trial_page', fn: render_promo_trial_page }
+    ])
+  })
+}
+
+function ui_render_org_subscription_info() {
+  return uiRunWrapped_('ui_render_org_subscription_info', () => {
+    runSteps_([
+      { name: 'render_org_subscription_info', fn: render_org_subscription_info }
+    ])
+  })
+}
+
 function ui_publish_the_good_stuff() {
   return uiRunWrapped_('ui_publish_the_good_stuff', () => {
     runSteps_([
@@ -146,7 +191,6 @@ function ui_rebuild_canon_tables() {
     runSteps_([
       { name: 'build_canon_orgs', fn: build_canon_orgs },
       { name: 'build_canon_users', fn: build_canon_users },
-      { name: 'render_org_info_view', fn: render_org_info_view },
       { name: 'render_sauron_view', fn: render_sauron_view },
       { name: 'render_ring_view', fn: render_ring_view }
     ])
@@ -157,16 +201,26 @@ function ui_run_arr_refresh() {
   return uiRunWrapped_('ui_run_arr_refresh', () => {
     runSteps_([
       { name: 'render_arr_raw_data_view', fn: render_arr_raw_data_view },
+      { name: 'one_time_migrate_arr_snapshot_to_new_schema', fn: one_time_migrate_arr_snapshot_to_new_schema },
+      { name: 'one_time_add_first_payment_cohort_to_arr_snapshot', fn: one_time_add_first_payment_cohort_to_arr_snapshot },
       { name: 'write_arr_snapshot', fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts', fn: render_arr_waterfall_facts }
     ])
   })
 }
 
-function ui_build_promo_backfill() {
-  return uiRunWrapped_('ui_build_promo_backfill', () => {
+function ui_run_arr_mapping_audit() {
+  return uiRunWrapped_('ui_run_arr_mapping_audit', () => {
     runSteps_([
-      { name: 'render_promo_redemptions_backfill', fn: render_promo_redemptions_backfill }
+      { name: 'render_arr_subscription_mapping_audit', fn: render_arr_subscription_mapping_audit }
+    ])
+  })
+}
+
+function ui_audit_all_stats_vs_ring() {
+  return uiRunWrapped_('ui_audit_all_stats_vs_ring', () => {
+    runSteps_([
+      { name: 'render_all_stats_vs_ring_audit', fn: render_all_stats_vs_ring_audit }
     ])
   })
 }

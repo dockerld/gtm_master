@@ -6,7 +6,7 @@
  * - Collects external attendee emails (normalized)
  * - Upserts Notion Contacts by Email (Email is PRIMARY KEY)
  * - Resolves org_id from canon_users (truth)
- * - Resolves org_name from org_info (manual truth)
+ * - Resolves org_name from canon_orgs (source of truth)
  * - Finds/creates Notion Company:
  *    - If org_id exists: find by Companies.sauron_org_id (rich_text) else create with real org name
  *    - Else: find/create Unknown Company (domain.com) (business domains only)
@@ -46,15 +46,16 @@ const CALCRM_MAX_UNIQUE_EMAILS_PER_RUN = 150
 
 // Sheets (truth sources)
 const CALCRM_SHEET_CANON_USERS = "canon_users" // email_key/email -> org_id
-const CALCRM_SHEET_ORG_INFO = "org_info"       // Org ID -> Org Name (manual)
+const CALCRM_SHEET_CANON_ORGS = "canon_orgs"   // Org ID -> Org Name
 
 // Mapping sheets (audit)
 const CALCRM_SHEET_MAP_ORG = "notion_sauron_map_org"
 const CALCRM_SHEET_MAP_USER = "notion_sauron_map_user"
 
-// org_info column names (do NOT change org_info sheet)
-const CALCRM_ORG_INFO_COL_ORG_ID = "Org ID"
-const CALCRM_ORG_INFO_COL_ORG_NAME = "Org Name"
+// canon_orgs column names
+const CALCRM_CANON_ORGS_COL_ORG_ID = "org_id"
+const CALCRM_CANON_ORGS_COL_ORG_NAME = "org_name"
+const CALCRM_CANON_ORGS_COL_ORG_SLUG = "org_slug"
 
 // Notion Companies DB props
 const CALCRM_NOTION_COMPANY_TITLE = "Company Name"           // title
@@ -194,7 +195,7 @@ function calcrm_notion_calendar_import_from_camden() {
     let desiredCompanyName = ""
 
     if (orgId) {
-      // ✅ Use org_info for the real name
+      // ✅ Use canon_orgs for the real name
       desiredCompanyName = orgInfo.orgIdToName.get(orgId) || ""
       if (!desiredCompanyName) desiredCompanyName = `Unknown Company (${domain || "linked"})`
 
@@ -215,7 +216,7 @@ function calcrm_notion_calendar_import_from_camden() {
           createdCompanies += 1
         }
 
-        // ✅ If found/created but still has placeholder name, rename to the real org_info name
+        // ✅ If found/created but still has placeholder name, rename to the real canon_orgs name
         calcrm_tryRenameCompanyIfUnknown_(notion, companyPage, desiredCompanyName)
         companyByOrgId.set(orgId, companyPage)
       } else {
@@ -285,7 +286,7 @@ function calcrm_notion_calendar_import_from_camden() {
         status: orgId ? "linked_to_org" : "domain_bucket",
         linked_at: nowIso,
         last_checked_at: nowIso,
-        notes: orgId ? "org_id from canon_users; org name from org_info" : "no org_id; domain bucket",
+        notes: orgId ? "org_id from canon_users; org name from canon_orgs" : "no org_id; domain bucket",
         upsale_sent: "",
         upsale_sent_at: "",
         upsale_notes: ""
@@ -375,7 +376,7 @@ function calcrm_buildCanonEmailToOrgIdIndex_() {
 
 function calcrm_buildOrgIdToOrgNameIndex_() {
   const ss = SpreadsheetApp.getActive()
-  const sh = ss.getSheetByName(CALCRM_SHEET_ORG_INFO)
+  const sh = ss.getSheetByName(CALCRM_SHEET_CANON_ORGS)
   const out = new Map()
   if (!sh || sh.getLastRow() < 2) return { orgIdToName: out }
 
@@ -383,17 +384,20 @@ function calcrm_buildOrgIdToOrgNameIndex_() {
   const lastCol = sh.getLastColumn()
   const header = sh.getRange(1, 1, 1, lastCol).getValues()[0].map(v => String(v || "").trim())
 
-  const cOrgId = header.findIndex(h => String(h).trim().toLowerCase() === CALCRM_ORG_INFO_COL_ORG_ID.toLowerCase())
-  const cOrgName = header.findIndex(h => String(h).trim().toLowerCase() === CALCRM_ORG_INFO_COL_ORG_NAME.toLowerCase())
+  const cOrgId = header.findIndex(h => String(h).trim().toLowerCase() === CALCRM_CANON_ORGS_COL_ORG_ID.toLowerCase())
+  const cOrgName = header.findIndex(h => String(h).trim().toLowerCase() === CALCRM_CANON_ORGS_COL_ORG_NAME.toLowerCase())
+  const cOrgSlug = header.findIndex(h => String(h).trim().toLowerCase() === CALCRM_CANON_ORGS_COL_ORG_SLUG.toLowerCase())
 
-  if (cOrgId < 0) throw new Error(`org_info missing column: ${CALCRM_ORG_INFO_COL_ORG_ID}`)
-  if (cOrgName < 0) throw new Error(`org_info missing column: ${CALCRM_ORG_INFO_COL_ORG_NAME}`)
+  if (cOrgId < 0) throw new Error(`canon_orgs missing column: ${CALCRM_CANON_ORGS_COL_ORG_ID}`)
+  if (cOrgName < 0 && cOrgSlug < 0) {
+    throw new Error(`canon_orgs missing columns: ${CALCRM_CANON_ORGS_COL_ORG_NAME} or ${CALCRM_CANON_ORGS_COL_ORG_SLUG}`)
+  }
 
   const data = sh.getRange(2, 1, lastRow - 1, lastCol).getValues()
   for (const r of data) {
     const orgId = String(r[cOrgId] || "").trim()
     if (!orgId) continue
-    const orgName = String(r[cOrgName] || "").trim()
+    const orgName = String((cOrgName >= 0 ? r[cOrgName] : '') || (cOrgSlug >= 0 ? r[cOrgSlug] : '') || "").trim()
     if (!orgName) continue
     out.set(orgId, orgName)
   }

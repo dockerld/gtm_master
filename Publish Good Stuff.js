@@ -17,9 +17,8 @@ const GOOD_STUFF_CFG = {
     SHEET_NAME: 'The Good Stuff'
   },
   KPI: {
-    COMBINED_COL: 2,        // B2:D2 in The Ring
-    PAID_ONLY_COL: 6,       // F2:H2 in The Ring
-    PAID_WITH_FIRST_COL: 10 // J2:L2 in The Ring
+    PAID_WITH_FIRST_COL: 2, // B2:D2 in The Ring
+    COMBINED_COL: 6         // F2:H2 in The Ring
   },
   ANNUAL_GOAL_ARR: 1000000,
   TABLE_START_ROW: 13
@@ -53,8 +52,10 @@ function publish_the_good_stuff() {
 
 function GOOD_readRingMetrics_(ringSheet) {
   function readTriplet(colStart) {
+    const labelRaw = ringSheet.getRange(1, colStart).getDisplayValue()
     const vals = ringSheet.getRange(2, colStart, 1, 3).getValues()[0]
     return {
+      title: GOOD_extractKpiTitle_(labelRaw),
       arr: GOOD_num_(vals[0]),
       subscriptions: GOOD_num_(vals[1]),
       totalSeats: GOOD_num_(vals[2])
@@ -63,7 +64,6 @@ function GOOD_readRingMetrics_(ringSheet) {
 
   return {
     combined: readTriplet(GOOD_STUFF_CFG.KPI.COMBINED_COL),
-    paidOnly: readTriplet(GOOD_STUFF_CFG.KPI.PAID_ONLY_COL),
     paidWithFirstPayment: readTriplet(GOOD_STUFF_CFG.KPI.PAID_WITH_FIRST_COL)
   }
 }
@@ -230,9 +230,22 @@ function GOOD_writeGoalStrip_(sheet, goals) {
 }
 
 function GOOD_writeKpiCards_(sheet, metrics) {
-  GOOD_writeKpiCard_(sheet, 4, 1, 'Paid + Promo Trial', metrics.combined, '#2563EB')
-  GOOD_writeKpiCard_(sheet, 4, 5, 'Paid Only', metrics.paidOnly, '#7C3AED')
-  GOOD_writeKpiCard_(sheet, 4, 9, 'Paid + First Payment', metrics.paidWithFirstPayment, '#EA580C')
+  GOOD_writeKpiCard_(
+    sheet,
+    4,
+    2,
+    metrics.paidWithFirstPayment.title || 'Paid + First Payment At',
+    metrics.paidWithFirstPayment,
+    '#EA580C'
+  )
+  GOOD_writeKpiCard_(
+    sheet,
+    4,
+    7,
+    metrics.combined.title || 'Paid + Promo Trial',
+    metrics.combined,
+    '#2563EB'
+  )
 }
 
 function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
@@ -361,6 +374,14 @@ function GOOD_pctText_(pct01) {
 function GOOD_num_(v) {
   const n = Number(v)
   return isFinite(n) ? n : 0
+}
+
+function GOOD_extractKpiTitle_(label) {
+  const s = String(label || '').trim()
+  if (!s) return ''
+  const m = s.match(/^[^(]+\(([^)]+)\)\s*$/)
+  if (m && m[1]) return String(m[1]).trim()
+  return s
 }
 
 function GOOD_clamp01_(n) {

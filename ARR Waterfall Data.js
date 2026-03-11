@@ -34,19 +34,25 @@ const ARR_RAW_CFG = {
   DATA_START_ROW: 3,
 
   INPUTS: {
-    CLERK_ORGS: "raw_clerk_orgs",
-    CLERK_MEMBERSHIPS: "raw_clerk_memberships",
-    CLERK_USERS: "raw_clerk_users",
+    ORG_SUBS_INFO: "org_subscription_info",
+    MANUAL_CHANGES: "Manual Stripe Changes",
     STRIPE_SUBS: "raw_stripe_subscriptions",
-    ORG_INFO: "org_info",
   },
 
-  // Trial standard length
-  TRIAL_DAYS: 14,
-
-  // Adds a validation status column if missing
-  VALIDATION_STATUS_HEADER: "status",
-  SUBSCRIPTION_START_HEADER: "subscription_start_date",
+  HEADERS: [
+    "org_id",
+    "org_name",
+    "org_creation_date",
+    "first_payment_date",
+    "churn_date",
+    "sign_up_cohort_month",
+    "first_payment_cohort_month",
+    "current_status",
+    "plan_name",
+    "billing_frequency",
+    "total_arr",
+    "subscription_start_date",
+  ],
 }
 
 function render_arr_raw_data_view() {
@@ -55,138 +61,101 @@ function render_arr_raw_data_view() {
     const ss = SpreadsheetApp.getActive()
 
     const shOut = ARR_getOrCreateSheet_(ss, ARR_RAW_CFG.SHEET_NAME)
-
-    const shOrgs = ss.getSheetByName(ARR_RAW_CFG.INPUTS.CLERK_ORGS)
-    const shMems = ss.getSheetByName(ARR_RAW_CFG.INPUTS.CLERK_MEMBERSHIPS)
-    const shUsers = ss.getSheetByName(ARR_RAW_CFG.INPUTS.CLERK_USERS)
+    const shOrgSubsInfo = ss.getSheetByName(ARR_RAW_CFG.INPUTS.ORG_SUBS_INFO)
+    if (!shOrgSubsInfo) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.ORG_SUBS_INFO}`)
+    const shManual = ss.getSheetByName(ARR_RAW_CFG.INPUTS.MANUAL_CHANGES)
     const shStripe = ss.getSheetByName(ARR_RAW_CFG.INPUTS.STRIPE_SUBS)
-    const shOrgInfo = ss.getSheetByName(ARR_RAW_CFG.INPUTS.ORG_INFO)
-
-    if (!shOrgs) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.CLERK_ORGS}`)
-    if (!shMems) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.CLERK_MEMBERSHIPS}`)
-    if (!shUsers) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.CLERK_USERS}`)
     if (!shStripe) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.STRIPE_SUBS}`)
-    if (!shOrgInfo) throw new Error(`Missing sheet: ${ARR_RAW_CFG.INPUTS.ORG_INFO}`)
 
-    // Ensure headers exist; also ensure "status" column exists
-    const header = ARR_ensureHeaderRow_(
-      shOut,
-      ARR_RAW_CFG.HEADER_ROW,
-      [ARR_RAW_CFG.VALIDATION_STATUS_HEADER, ARR_RAW_CFG.SUBSCRIPTION_START_HEADER]
-    )
-    const headerMap = ARR_headerMapFromRow_(header)
-
-    // Read inputs
-    const orgs = ARR_readSheetObjects_(shOrgs, 1)
-    const mems = ARR_readSheetObjects_(shMems, 1)
-    const users = ARR_readSheetObjects_(shUsers, 1)
-    const subs = ARR_readSheetObjects_(shStripe, 1)
-    const orgInfo = ARR_readSheetObjects_(shOrgInfo, 1)
-
-    // Build indexes
-    const membershipsByOrgId = ARR_buildMembershipsByOrgId_(mems) // orgId -> [{email,email_key,role,created_at}]
-    const stripeBySubId = ARR_buildStripeBySubscriptionId_(subs)  // subId -> stripe row obj
-    const userByEmailKey = ARR_buildUsersByEmailKey_(users)       // email_key -> user obj (incl stripe_subscription_id)
-    const orgInfoById = ARR_buildOrgInfoById_(orgInfo)
-
-    // orgId -> Set(subIds) from memberships -> users -> stripe_subscription_id
-    const subIdsByOrgId = ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users)
-
-    // orgId -> derived subscription rollup (earliest purchase, current status, etc.)
-    const subRollupByOrgId = ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId)
+    const header = ARR_RAW_CFG.HEADERS.slice()
+    shOut.getRange(ARR_RAW_CFG.HEADER_ROW, 1, 1, Math.max(shOut.getMaxColumns(), header.length)).clearContent()
+    shOut.getRange(ARR_RAW_CFG.HEADER_ROW, 1, 1, header.length).setValues([header])
+    const excludedSubIds = ARR_buildInternalExcludeSubIdSet_(shManual)
+    const orgSubsAll = ARR_readSheetObjects_(shOrgSubsInfo, 1)
+    const stripeRows = ARR_readSheetObjects_(shStripe, 1)
+    const stripeBySubId = ARR_buildStripeBySubscriptionId_(stripeRows)
+    const orgSubs = (orgSubsAll || []).filter(r => {
+      const subId =
+        ARR_str_(r.latest_subscription_id) ||
+        ARR_str_(r.stripe_subscription_id) ||
+        ARR_str_(r.subscription_id) ||
+        ARR_str_(r.id)
+      if (!subId) return true
+      return !excludedSubIds.has(subId)
+    })
 
     // Now build output rows in the existing column order
     const outRows = []
-    const nowIso = new Date().toISOString()
 
     // Sort for stability
-    const sortedOrgs = orgs
+    const sortedOrgs = orgSubs
       .map(o => ({
-        org_id: ARR_str_(o.org_id),
-        org_name: ARR_str_(o.org_name) || ARR_str_(o.org_slug),
-        org_created_at: ARR_str_(o.created_at || o.org_created_at),
+        org_id: ARR_str_(o.app_org_id || o.org_id),
+        org_name: ARR_str_(o.org_name),
       }))
       .filter(o => o.org_id)
       .sort((a, b) => (a.org_name || "").localeCompare(b.org_name || "") || a.org_id.localeCompare(b.org_id))
 
+    const infoByOrgId = new Map()
+    ;(orgSubs || []).forEach(r => {
+      const orgId = ARR_str_(r.app_org_id || r.org_id)
+      if (!orgId || infoByOrgId.has(orgId)) return
+      infoByOrgId.set(orgId, r)
+    })
+
     for (const o of sortedOrgs) {
       const orgId = o.org_id
-      const orgName = o.org_name
-      const orgCreationIso = ARR_toIsoOrBlank_(o.org_created_at)
+      const info = infoByOrgId.get(orgId) || {}
+      const orgName = ARR_str_(info.org_name) || o.org_name
 
-      // org owner email: earliest owner membership (fallback admin/member)
-      const ownerEmail = ARR_pickOrgOwnerEmail_(membershipsByOrgId.get(orgId) || [])
+      const statusRaw = ARR_str_(info.status).toLowerCase()
+      const orgCreatedAtIso = ARR_toIsoOrBlank_(info.org_created_at)
+      const firstPaymentIso = ARR_toIsoOrBlank_(info.first_payment_at)
+      const subscriptionStartIso = ARR_toIsoOrBlank_(info.subscription_created_at_date)
+      const purchaseDate = firstPaymentIso
+      const signUpCohortMonth = ARR_isoToCohortMonth_(orgCreatedAtIso || "")
+      const firstPaymentCohortMonth = ARR_isoToCohortMonth_(purchaseDate || "")
 
-      // subscription rollup for org
-      const roll = subRollupByOrgId.get(orgId) || ARR_emptyRollup_()
+      // Current status from org_subscription_info
+      const currentStatus = ARR_str_(info.status)
+      const interval = ARR_str_(info.interval).toLowerCase()
+      const intervalCount = Math.max(1, ARR_num_(info.interval_count) || 1)
+      const billingFrequency =
+        interval === "year" ? "yearly" :
+        interval === "month" ? "monthly" :
+        (interval ? interval : "")
+      const planName =
+        ARR_str_(info.plan_name) ||
+        (billingFrequency ? `plan_${billingFrequency}_${intervalCount}` : "")
 
-      // Stripe email (customer email)
-      const stripeEmail = roll.stripe_email || ""
-
-      const info = orgInfoById.get(orgId) || {}
-      const trialStart = ARR_toIsoOrBlank_(info.trial_start_date)
-      const trialEnd = ARR_toIsoOrBlank_(info.trial_end_date)
-      const subscriptionStart = ARR_toIsoOrBlank_(info.subscription_start_date)
-      const infoPurchaseDate = ARR_toIsoOrBlank_(info.purchase_date)
-
-      // Cohorts
-      const trialCohortMonth = ARR_isoToCohortMonthDate_(trialStart)
-      const paidCohortMonth = ARR_isoToCohortMonth_(infoPurchaseDate || roll.purchase_date || "")
-
-      // Current status (lifecycle; keep your existing column name "current_status")
-      const currentStatus = roll.current_status || (roll.has_active ? "active" : (roll.has_any ? "inactive" : ""))
-
-      // Plan name / billing freq from Stripe
-      const planName = roll.plan_name || ""
-      const billingFrequency = roll.billing_frequency || ""
-
-      // ARR
-      const totalArr = ARR_num_(roll.total_arr)
-      const meetingAssArr = totalArr // your “same numbers” rule
-
-      // Churn
-      const churnDate = roll.churn_date || ""
-
-      // ✅ Validation status column
-      const validationStatus =
-        (Number(roll.discount_percent) === 100 && String(roll.discount_duration || "").toLowerCase() === "forever")
-          ? "Invalid"
-          : ""
+      // ARR group rule: only active + first_payment_at; discount-aware from org_subscription_info fields.
+      const arrEligible = statusRaw === "active" && !!firstPaymentIso
+      const subId =
+        ARR_str_(info.latest_subscription_id) ||
+        ARR_str_(info.stripe_subscription_id) ||
+        ARR_str_(info.subscription_id) ||
+        ARR_str_(info.id)
+      const stripeRow = subId ? (stripeBySubId.get(subId) || null) : null
+      const arrSourceRow = stripeRow || info
+      const totalArr = arrEligible
+        ? ARR_computeEffectiveArrFromSubscriptionRow_(arrSourceRow, new Date())
+        : 0
+      const churnDate = ARR_toIsoOrBlank_(info.churn_date)
 
       // Map to your output headers by name (so column order can evolve safely)
       const rowObj = {
         org_id: orgId,
         org_name: orgName,
-        org_email: ownerEmail,
-        stripe_email: stripeEmail,
-        org_creation_date: orgCreationIso,
-
-        created_at: nowIso,
-        last_updated_at: nowIso,
-
-        trial_start_date: trialStart,
-        trial_end_date: trialEnd,
-        subscription_start_date: subscriptionStart,
-
-        purchase_date: infoPurchaseDate || roll.purchase_date || "",
+        org_creation_date: orgCreatedAtIso,
+        first_payment_date: purchaseDate || "",
         churn_date: churnDate,
-
-        trial_cohort_month: trialCohortMonth,
-        paid_cohort_month: paidCohortMonth,
-
+        sign_up_cohort_month: signUpCohortMonth,
+        first_payment_cohort_month: firstPaymentCohortMonth,
         current_status: currentStatus,
         plan_name: planName,
         billing_frequency: billingFrequency,
-
-        acquisition_channel: "",
-
         total_arr: totalArr,
-        meeting_ass_arr: meetingAssArr,
-        product_2_arr: 0,
-        product_3_arr: 0,
-
-        notes: "",
-        status: validationStatus, // ✅ NEW column
+        subscription_start_date: subscriptionStartIso,
       }
 
       outRows.push(ARR_rowFromHeader_(header, rowObj))
@@ -205,12 +174,12 @@ function render_arr_raw_data_view() {
 
     const seconds = (new Date() - t0) / 1000
     if (typeof writeSyncLog === "function") {
-      writeSyncLog("render_arr_raw_data_view", "ok", sortedOrgs.length, outRows.length, seconds, "")
+      writeSyncLog("render_arr_raw_data_view", "ok", orgSubsAll.length, outRows.length, seconds, "")
     } else {
-      Logger.log(`[render_arr_raw_data_view] ok rows_in=${sortedOrgs.length} rows_out=${outRows.length} seconds=${seconds}`)
+      Logger.log(`[render_arr_raw_data_view] ok rows_in=${orgSubsAll.length} rows_out=${outRows.length} seconds=${seconds}`)
     }
 
-    return { rows_in: sortedOrgs.length, rows_out: outRows.length }
+    return { rows_in: orgSubsAll.length, rows_out: outRows.length }
   })
 }
 
@@ -292,16 +261,25 @@ function ARR_emptyRollup_() {
     discount_percent: "",
     discount_duration: "",
     discount_duration_months: "",
+    discount_start_at: "",
+    discount_end_at: "",
 
     current_status: "",
   }
 }
 
-function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
+function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId, opts) {
   const out = new Map()
+  const options = opts || {}
+  const excludedSubIds = options.excludedSubIds instanceof Set ? options.excludedSubIds : new Set()
+  const asOfDate = (options.asOfDate instanceof Date && !isNaN(options.asOfDate.getTime()))
+    ? options.asOfDate
+    : new Date()
 
   subIdsByOrgId.forEach((subIdSet, orgId) => {
-    const ids = Array.from(subIdSet || []).filter(Boolean)
+    const ids = Array.from(subIdSet || [])
+      .filter(Boolean)
+      .filter(id => !excludedSubIds.has(id))
     if (!ids.length) {
       out.set(orgId, ARR_emptyRollup_())
       return
@@ -316,18 +294,22 @@ function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
       return
     }
 
-    // Determine active vs any
+    // Determine lifecycle-active (any active) vs ARR-eligible paid-active rows.
+    // ARR group rule: only status=active with first_payment_at populated.
     const activeRows = rows.filter(r => String(r.status || "").toLowerCase() === "active")
     const hasActive = activeRows.length > 0
+    const paidActiveRows = activeRows.filter(r => !!ARR_toIsoOrBlank_(r.first_payment_at))
+    const hasPaidActive = paidActiveRows.length > 0
 
     // Purchase date = earliest first_payment_at across all subs (do NOT overwrite later)
     const purchaseIso = ARR_minIso_(rows.map(r => r.first_payment_at).filter(Boolean))
 
-    // Churn date = if no active subs, take max(canceled_at) among rows
+    // Churn date = if no active subs, take max(canceled_at) among canceled rows
     let churnIso = ""
     if (!hasActive) {
       churnIso = ARR_maxIso_(
         rows
+          .filter(r => String(r.status || "").toLowerCase() === "canceled")
           .map(r => r.canceled_at)
           .filter(Boolean)
       )
@@ -351,14 +333,12 @@ function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
       bestForPlan.plan_name ||
       (billingFrequency ? `plan_${billingFrequency}_${intervalCount}` : "")
 
-    // ARR: prefer amount_yearly if present, else compute from amount+interval
-    let totalArr = 0
-    if (bestForPlan.amount_yearly != null && bestForPlan.amount_yearly !== "") {
-      totalArr = Number(bestForPlan.amount_yearly) || 0
-    } else {
-      const amt = Number(bestForPlan.amount) || 0
-      totalArr = (interval === "year") ? amt : (amt * 12)
-    }
+    // ARR is org-level and follows the same "Paid" bucket rule used elsewhere:
+    // sum effective ARR across paid-active subscriptions only (active + first_payment_at).
+    // If org has no paid-active subs, ARR is 0.
+    const totalArr = hasPaidActive
+      ? paidActiveRows.reduce((sum, row) => sum + ARR_computeEffectiveArrFromSubscriptionRow_(row, asOfDate), 0)
+      : 0
 
     // Stripe email
     const stripeEmail = String(bestForPlan.customer_email || "").trim()
@@ -367,9 +347,19 @@ function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
     const discountPercent = bestForPlan.discount_percent
     const discountDuration = bestForPlan.discount_duration
     const discountDurationMonths = bestForPlan.discount_duration_months
+    const discountStartAt =
+      ARR_toIsoOrBlank_(bestForPlan.discount_start_at) ||
+      ARR_toIsoOrBlank_(bestForPlan.first_payment_at) ||
+      ARR_toIsoOrBlank_(bestForPlan.created_at)
+    const discountEndAt = ARR_toIsoOrBlank_(bestForPlan.discount_end_at)
 
-    // Current status: "active" if any active else bestForPlan.status
-    const currentStatus = hasActive ? "active" : String(bestForPlan.status || "").trim()
+    // Current status: org-level lifecycle
+    let currentStatus = "active"
+    if (!hasActive) {
+      const hasCanceled = rows.some(r => String(r.status || "").toLowerCase() === "canceled")
+      if (hasCanceled) currentStatus = "canceled"
+      else currentStatus = String(bestForPlan.status || "").trim()
+    }
 
     out.set(orgId, {
       has_any: true,
@@ -386,6 +376,8 @@ function ARR_buildOrgSubscriptionRollup_(subIdsByOrgId, stripeBySubId) {
       discount_percent: discountPercent,
       discount_duration: discountDuration,
       discount_duration_months: discountDurationMonths,
+      discount_start_at: discountStartAt,
+      discount_end_at: discountEndAt,
 
       current_status: currentStatus,
     })
@@ -405,6 +397,186 @@ function ARR_pickBestSubscriptionRow_(rows) {
   })
 
   return scored[0] || rows[0]
+}
+
+function ARR_computeEffectiveArrFromSubscriptionRow_(row, asOfDate) {
+  const amount = ARR_num_(row && row.amount)
+  const interval = ARR_str_(row && row.interval).toLowerCase()
+  const intervalCount = Math.max(1, ARR_num_(row && row.interval_count) || 1)
+  const amountYearly = ARR_num_(row && row.amount_yearly)
+
+  const baseAmount = amount > 0 ? amount : 0
+  const baseArr = (amountYearly > 0)
+    ? amountYearly
+    : ARR_computeAnnualizedAmount_(baseAmount, interval, intervalCount)
+
+  if (baseArr <= 0) return 0
+
+  const effectiveAmount = (baseAmount > 0)
+    ? ARR_applyActiveDiscountsToAmount_(baseAmount, row, asOfDate)
+    : baseAmount
+  const effectiveArrFromAmount = (effectiveAmount > 0)
+    ? ARR_computeAnnualizedAmount_(effectiveAmount, interval, intervalCount)
+    : 0
+
+  if (effectiveAmount > 0) return effectiveArrFromAmount
+
+  // Fallback when amount field is unavailable but annualized amount exists:
+  // apply percent discounts directly on ARR and amount_off via annualization.
+  let arrOut = baseArr
+  const details = ARR_activeDiscountsFromRow_(row, asOfDate)
+  for (const d of details) {
+    const pct = Number(d.percent_off)
+    if (isFinite(pct) && pct > 0) {
+      const bounded = Math.max(0, Math.min(100, pct))
+      arrOut *= (1 - bounded / 100)
+    }
+    const amtOff = Number(d.amount_off)
+    if (isFinite(amtOff) && amtOff > 0) {
+      arrOut -= ARR_computeAnnualizedAmount_(amtOff, interval, intervalCount)
+    }
+  }
+  return Math.max(0, arrOut)
+}
+
+function ARR_computeAnnualizedAmount_(amount, interval, intervalCount) {
+  const amt = ARR_num_(amount)
+  if (amt <= 0) return 0
+  const months = ARR_intervalMonths_(interval, intervalCount)
+  return months > 0 ? (amt * (12 / months)) : (amt * 12)
+}
+
+function ARR_intervalMonths_(interval, intervalCount) {
+  const intv = ARR_str_(interval).toLowerCase().trim()
+  const count = Math.max(1, ARR_num_(intervalCount) || 1)
+  if (intv === "year" || intv === "annual" || intv === "yr") return 12 * count
+  if (intv === "month" || intv === "mo") return count
+  return 1
+}
+
+function ARR_applyActiveDiscountsToAmount_(baseAmount, row, asOfDate) {
+  let out = ARR_num_(baseAmount)
+  const active = ARR_activeDiscountsFromRow_(row, asOfDate)
+  for (const d of active) {
+    const pct = Number(d.percent_off)
+    if (isFinite(pct) && pct > 0) {
+      const bounded = Math.max(0, Math.min(100, pct))
+      out *= (1 - bounded / 100)
+    }
+    const amountOff = Number(d.amount_off)
+    if (isFinite(amountOff) && amountOff > 0) {
+      out -= amountOff
+    }
+    if (out <= 0) return 0
+  }
+  return Math.max(0, out)
+}
+
+function ARR_activeDiscountsFromRow_(row, asOfDate) {
+  const details = ARR_parseDiscountDetailsFromRow_(row)
+  return details.filter(d => ARR_isDiscountActiveOnDate_(d, asOfDate))
+}
+
+function ARR_parseDiscountDetailsFromRow_(row) {
+  const out = []
+  if (!row) return out
+
+  const jsonRaw = ARR_str_(row.discount_details_json)
+  if (jsonRaw) {
+    try {
+      const arr = JSON.parse(jsonRaw)
+      if (Array.isArray(arr)) {
+        arr.forEach((d, i) => {
+          if (!d || typeof d !== "object") return
+          out.push({
+            index: i + 1,
+            percent_off: ARR_num_(d.percent_off),
+            amount_off: ARR_num_(d.amount_off),
+            duration: ARR_str_(d.duration).toLowerCase(),
+            duration_in_months: ARR_num_(d.duration_in_months),
+            start_at: ARR_toIsoOrBlank_(d.start_at),
+            end_at: ARR_toIsoOrBlank_(d.end_at),
+            promotion_code: ARR_str_(d.promotion_code),
+          })
+        })
+      }
+    } catch (e) {}
+  }
+
+  if (out.length) return out
+
+  const pctAll = ARR_csvList_(row.discount_percent_all)
+  const amtAll = ARR_csvList_(row.discount_amount_off_all)
+  const durAll = ARR_csvList_(row.discount_duration_all)
+  const durMonthsAll = ARR_csvList_(row.discount_duration_months_all)
+  const startAll = ARR_csvList_(row.discount_start_at_all)
+  const endAll = ARR_csvList_(row.discount_end_at_all)
+  const promoAll = ARR_csvList_(row.promo_code_all)
+  const n = Math.max(
+    pctAll.length,
+    amtAll.length,
+    durAll.length,
+    durMonthsAll.length,
+    startAll.length,
+    endAll.length,
+    promoAll.length
+  )
+
+  for (let i = 0; i < n; i++) {
+    out.push({
+      index: i + 1,
+      percent_off: ARR_num_(pctAll[i]),
+      amount_off: ARR_num_(amtAll[i]),
+      duration: ARR_str_(durAll[i]).toLowerCase(),
+      duration_in_months: ARR_num_(durMonthsAll[i]),
+      start_at: ARR_toIsoOrBlank_(startAll[i]),
+      end_at: ARR_toIsoOrBlank_(endAll[i]),
+      promotion_code: ARR_str_(promoAll[i]),
+    })
+  }
+
+  if (out.length) return out
+
+  out.push({
+    index: 1,
+    percent_off: ARR_num_(row.discount_percent),
+    amount_off: ARR_num_(row.discount_amount_off),
+    duration: ARR_str_(row.discount_duration).toLowerCase(),
+    duration_in_months: ARR_num_(row.discount_duration_months),
+    start_at: ARR_toIsoOrBlank_(row.discount_start_at || row.first_payment_at || row.created_at),
+    end_at: ARR_toIsoOrBlank_(row.discount_end_at),
+    promotion_code: ARR_str_(row.promo_code),
+  })
+  return out
+}
+
+function ARR_isDiscountActiveOnDate_(detail, asOfDate) {
+  const asOf = (asOfDate instanceof Date && !isNaN(asOfDate.getTime()))
+    ? asOfDate
+    : new Date()
+  const d = detail || {}
+  const duration = ARR_str_(d.duration).toLowerCase()
+  const start = ARR_parseIsoDate_(d.start_at)
+  const explicitEnd = ARR_parseIsoDate_(d.end_at)
+
+  if (start && asOf < start) return false
+  if (explicitEnd) return asOf < explicitEnd
+
+  if (duration === "forever") return true
+  if (duration === "repeating" || duration === "once") {
+    if (!start) return false
+    const monthsRaw = ARR_num_(d.duration_in_months)
+    const months = (isFinite(monthsRaw) && monthsRaw > 0) ? monthsRaw : 1
+    const end = ARR_addMonths_(start, months)
+    return asOf < end
+  }
+  return false
+}
+
+function ARR_csvList_(v) {
+  const s = ARR_str_(v)
+  if (!s) return []
+  return s.split(",").map(x => ARR_str_(x))
 }
 
 /* ============================================================
@@ -438,22 +610,22 @@ function ARR_buildUsersByEmailKey_(users) {
   return out
 }
 
-function ARR_buildOrgInfoById_(rows) {
-  const out = new Map()
-  ;(rows || []).forEach(r => {
-    const orgId = ARR_str_(r.org_id)
-    if (!orgId) return
-    out.set(orgId, r)
-  })
-  return out
-}
-
 function ARR_buildStripeBySubscriptionId_(subs) {
   const out = new Map()
   ;(subs || []).forEach(s => {
     const id = ARR_str_(s.stripe_subscription_id || s.subscription_id || s.id)
     if (!id) return
     out.set(id, s)
+  })
+  return out
+}
+
+function ARR_buildCanonByClerkOrgId_(canonRows) {
+  const out = new Map()
+  ;(canonRows || []).forEach(r => {
+    const clerkOrgId = ARR_str_(r.clerk_org_id || r.org_id)
+    if (!clerkOrgId || out.has(clerkOrgId)) return
+    out.set(clerkOrgId, r)
   })
   return out
 }
@@ -491,6 +663,23 @@ function ARR_buildSubIdsByOrgId_(membershipsByOrgId, userByEmailKey, users) {
     out.set(orgId, set)
   })
 
+  return out
+}
+
+function ARR_buildInternalExcludeSubIdSet_(sheet) {
+  const out = new Set()
+  if (!sheet) return out
+
+  const rows = ARR_readSheetObjects_(sheet, 1)
+  ;(rows || []).forEach(r => {
+    const reason = ARR_str_(r.exclude_reason).toLowerCase()
+    if (reason !== "internal") return
+    const subId =
+      ARR_str_(r.subscription_id) ||
+      ARR_str_(r.stripe_subscription_id) ||
+      ARR_str_(r.subscription)
+    if (subId) out.add(subId)
+  })
   return out
 }
 
@@ -587,13 +776,21 @@ function ARR_clearDataRegion_(sheet, startRow, numCols) {
 
 function ARR_applyArrRawFormats_(sheet, header, numRows) {
   if (!numRows) return
-  const trialIdx = header.findIndex(h => String(h || "").trim().toLowerCase() === "trial_cohort_month")
-  if (trialIdx >= 0) {
-    const col = trialIdx + 1
-    sheet.getRange(ARR_RAW_CFG.DATA_START_ROW, col, numRows, 1).setNumberFormat("MMM yyyy")
-  }
+  const cohortHeaders = ["sign_up_cohort_month", "first_payment_cohort_month"]
+  cohortHeaders.forEach(h => {
+    const idx = header.findIndex(k => String(k || "").trim().toLowerCase() === h)
+    if (idx < 0) return
+    sheet.getRange(ARR_RAW_CFG.DATA_START_ROW, idx + 1, numRows, 1).setNumberFormat("mmm yyyy")
+  })
 
-  const numHeaders = ["total_arr", "meeting_ass_arr", "product_2_arr", "product_3_arr"]
+  const dateHeaders = ["org_creation_date", "first_payment_date", "churn_date", "subscription_start_date"]
+  dateHeaders.forEach(h => {
+    const idx = header.findIndex(k => String(k || "").trim().toLowerCase() === h)
+    if (idx < 0) return
+    sheet.getRange(ARR_RAW_CFG.DATA_START_ROW, idx + 1, numRows, 1).setNumberFormat("yyyy-mm-dd hh:mm:ss")
+  })
+
+  const numHeaders = ["total_arr"]
   numHeaders.forEach(h => {
     const idx = header.findIndex(k => String(k || "").trim().toLowerCase() === h)
     if (idx < 0) return

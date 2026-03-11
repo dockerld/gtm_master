@@ -25,18 +25,18 @@ function COMBINED_renderConversionOnboarding_(opts) {
 
   const shOut = getOrCreateSheetCompat_(ss, COMBINED_STATS_CFG.SHEET_NAME)
   const shOrgs = ss.getSheetByName(CONV_CFG.INPUTS.CLERK_ORGS)
-  const shOrgInfo = ss.getSheetByName(CONV_CFG.INPUTS.ORG_INFO)
+  const shArrRaw = ss.getSheetByName(CONV_CFG.INPUTS.ARR_RAW_DATA)
   const shPosthog = ss.getSheetByName(ONB_CFG.POSTHOG_SHEET)
   const shClerk = ss.getSheetByName(ONB_CFG.CLERK_SHEET)
 
   if (!shOrgs) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.CLERK_ORGS}`)
-  if (!shOrgInfo) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ORG_INFO}`)
+  if (!shArrRaw) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ARR_RAW_DATA}`)
   if (!shPosthog) throw new Error(`Missing input sheet: ${ONB_CFG.POSTHOG_SHEET}`)
   if (!shClerk) throw new Error(`Missing input sheet: ${ONB_CFG.CLERK_SHEET}`)
 
   const tz = Session.getScriptTimeZone()
 
-  const statsByMonth = CONV_collectStatsByMonth_(shOrgs, shOrgInfo, tz)
+  const statsByMonth = CONV_collectStatsByMonth_(shOrgs, shArrRaw, tz)
   const convRows = CONV_buildRows_(statsByMonth)
 
   const createdByEmailKey = ONB_buildCreatedAtIndex_(shClerk)

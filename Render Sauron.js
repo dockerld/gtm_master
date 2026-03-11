@@ -6,7 +6,7 @@
  * ✅ Key features:
  * - Pulls Active Days (PostHog) from raw_posthog_user_metrics (email_key -> active_days)
  * - Preserves manual columns (Service, In Onboarding, Task Type, Create Task, etc)
- * - ✅ Service is overridden by org_info.Service (org-level manual) via Org ID
+ * - ✅ Service comes from canon_orgs.service (org-level manual field)
  * - ✅ Days since last Login now PREFERS canon_users.days_since_last_login
  *   (falls back to computing from canon_users.last_login_date if needed)
  * - ✅ DEBUG MODE: writes “seen/skipped” rows to a "Sauron Debug" sheet
@@ -25,8 +25,7 @@ const SAURON_CFG = {
     CANON_ORGS: 'canon_orgs',
     CLERK_MEMBERSHIPS: 'raw_clerk_memberships',
     CLERK_USERS_RAW: 'raw_clerk_users',
-    POSTHOG_USERS_RAW: 'raw_posthog_user_metrics',
-    ORG_INFO: 'org_info'
+    POSTHOG_USERS_RAW: 'raw_posthog_user_metrics'
   },
 
   // IMPORTANT: this is the row index for the SAURON SHEET header row
@@ -124,10 +123,6 @@ const SAURON_CFG = {
   }
 }
 
-// org_info columns (row 1 headers)
-const SAURON_ORG_INFO_ORG_ID_HEADER = 'Org ID'
-const SAURON_ORG_INFO_SERVICE_HEADER = 'Service'
-
 /**
  * ✅ Debug controls
  * Turn ENABLED on to write debug rows to a sheet.
@@ -158,13 +153,11 @@ function render_sauron_view() {
       const shMems = ss.getSheetByName(SAURON_CFG.INPUTS.CLERK_MEMBERSHIPS)
       const shClerkUsersRaw = ss.getSheetByName(SAURON_CFG.INPUTS.CLERK_USERS_RAW)
       const shPosthogUsersRaw = ss.getSheetByName(SAURON_CFG.INPUTS.POSTHOG_USERS_RAW)
-      const shOrgInfo = ss.getSheetByName(SAURON_CFG.INPUTS.ORG_INFO)
 
       if (!shUsers) throw new Error(`Missing input sheet: ${SAURON_CFG.INPUTS.CANON_USERS}`)
       if (!shOrgs) throw new Error(`Missing input sheet: ${SAURON_CFG.INPUTS.CANON_ORGS}`)
       if (!shClerkUsersRaw) throw new Error(`Missing input sheet: ${SAURON_CFG.INPUTS.CLERK_USERS_RAW}`)
       if (!shPosthogUsersRaw) throw new Error(`Missing input sheet: ${SAURON_CFG.INPUTS.POSTHOG_USERS_RAW}`)
-      if (!shOrgInfo) throw new Error(`Missing input sheet: ${SAURON_CFG.INPUTS.ORG_INFO}`)
 
       // DEBUG SHEET (optional)
       const debugSh = SAURON_debugReset_(ss)
@@ -184,9 +177,6 @@ function render_sauron_view() {
 
       const payingIndex = SAURON_buildPayingIndex_(shClerkUsersRaw, shMems)
       const activeDaysByEmailKey = SAURON_buildActiveDaysIndex_(shPosthogUsersRaw)
-
-      // ✅ org-level Service index (Org ID -> Service)
-      const serviceByOrgId = SAURON_buildOrgInfoServiceByOrgId_(shOrgInfo)
 
       // Preserve manual values from existing Sauron (per-email)
       const existingManualByEmail = SAURON_readExistingManual_(sh)
@@ -276,13 +266,9 @@ function render_sauron_view() {
         }
 
         // ✅ Service precedence:
-        // 1) org_info.Service (org-level manual)
-        // 2) existing manual Service on Sauron (per-email, if present)
-        // 3) canon_orgs.service fallback
-        const orgInfoService = orgId ? (serviceByOrgId.get(orgId) || '') : ''
-        const service = orgInfoService
-          ? orgInfoService
-          : SAURON_pickManualOrDefault_(priorManual, 'Service', String(org.service || '').trim())
+        // 1) existing manual Service on Sauron (per-email, if present)
+        // 2) canon_orgs.service fallback
+        const service = SAURON_pickManualOrDefault_(priorManual, 'Service', String(org.service || '').trim())
 
         const dwp = Number(daysWithPing)
         const autoInOnboarding = (!isNaN(dwp) && isFinite(dwp) && dwp <= 14)
@@ -903,38 +889,4 @@ function SAURON_normEmail_(v) {
   }
 
   return raw.toLowerCase()
-}
-
-/**
- * ✅ org_info -> Service index
- * Expects org_info headers row 1 including:
- * - "Org ID"
- * - "Service"
- */
-function SAURON_buildOrgInfoServiceByOrgId_(sheet) {
-  const out = new Map()
-
-  const lastRow = sheet.getLastRow()
-  const lastCol = sheet.getLastColumn()
-  if (lastRow < 2 || lastCol < 1) return out
-
-  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(v => String(v || '').trim())
-
-  const orgIdIdx = header.findIndex(h => h.toLowerCase() === String(SAURON_ORG_INFO_ORG_ID_HEADER).toLowerCase())
-  const serviceIdx = header.findIndex(h => h.toLowerCase() === String(SAURON_ORG_INFO_SERVICE_HEADER).toLowerCase())
-
-  if (orgIdIdx < 0 || serviceIdx < 0) {
-    throw new Error(`org_info must have headers: "${SAURON_ORG_INFO_ORG_ID_HEADER}", "${SAURON_ORG_INFO_SERVICE_HEADER}"`)
-  }
-
-  const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues()
-  data.forEach(r => {
-    const orgId = String(r[orgIdIdx] || '').trim()
-    if (!orgId) return
-    const service = String(r[serviceIdx] || '').trim()
-    if (!service) return
-    out.set(orgId, service)
-  })
-
-  return out
 }

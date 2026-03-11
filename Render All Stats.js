@@ -9,9 +9,10 @@ const ALL_STATS_CFG = {
   SHEET_NAME: 'All the Stats',
   INPUTS: {
     STRIPE_SUBS: 'raw_stripe_subscriptions',
+    ORG_SUBSCRIPTIONS: 'org_subscription_info',
+    POSTHOG_PROMO_REDEMPTIONS: 'promo_redemptions',
     MANUAL_CHANGES: 'Manual Stripe Changes',
-    PROMO_REDEMPTIONS: 'promo_redemptions',
-    PROMO_CODES: 'promo_codes',
+    CANON_ORGS: 'canon_orgs',
     CLERK_USERS: 'raw_clerk_users',
     CLERK_MEMBERSHIPS: 'raw_clerk_memberships',
     CLERK_ORGS: 'raw_clerk_orgs',
@@ -19,11 +20,9 @@ const ALL_STATS_CFG = {
     ARR_SNAPSHOT: 'arr_snapshot',
     ARR_WATERFALL_FACTS: 'arr_waterfall_facts'
   },
-  EXCLUDED_REASON_TERMS: ['internal', 'testing', 'duplicate'],
-  FREE_SEAT_MONTHLY_DISCOUNT: 30,
-  FREE_SEAT_YEARLY_DISCOUNT: 288,
   CURRENCY_FMT: '$#,##0.00',
   INT_FMT: '0',
+  DECIMAL_FMT: '0.00',
   PCT_FMT: '0.0%',
   DATETIME_FMT: 'yyyy-mm-dd hh:mm:ss',
   DATE_FMT: 'yyyy-mm-dd',
@@ -42,10 +41,13 @@ function render_all_stats_view() {
 
     const shStripe = ss.getSheetByName(ALL_STATS_CFG.INPUTS.STRIPE_SUBS)
     if (!shStripe) throw new Error('Missing input sheet: raw_stripe_subscriptions')
+    const shOrgSubscriptions = ss.getSheetByName(ALL_STATS_CFG.INPUTS.ORG_SUBSCRIPTIONS)
+    if (!shOrgSubscriptions) throw new Error('Missing input sheet: org_subscription_info')
 
+    const shPromoRedemptions = ss.getSheetByName(ALL_STATS_CFG.INPUTS.POSTHOG_PROMO_REDEMPTIONS)
     const shManual = ss.getSheetByName(ALL_STATS_CFG.INPUTS.MANUAL_CHANGES)
-    const shPromoRedemptions = ss.getSheetByName(ALL_STATS_CFG.INPUTS.PROMO_REDEMPTIONS)
-    const shPromoCodes = ss.getSheetByName(ALL_STATS_CFG.INPUTS.PROMO_CODES)
+    const shCanonOrgs = ss.getSheetByName(ALL_STATS_CFG.INPUTS.CANON_ORGS)
+    if (!shCanonOrgs) throw new Error('Missing input sheet: canon_orgs')
     const shUsers = ss.getSheetByName(ALL_STATS_CFG.INPUTS.CLERK_USERS)
     const shMems = ss.getSheetByName(ALL_STATS_CFG.INPUTS.CLERK_MEMBERSHIPS)
     const shOrgs = ss.getSheetByName(ALL_STATS_CFG.INPUTS.CLERK_ORGS)
@@ -54,22 +56,23 @@ function render_all_stats_view() {
     const shWaterfall = ss.getSheetByName(ALL_STATS_CFG.INPUTS.ARR_WATERFALL_FACTS)
 
     const stripeRows = ALLSTATS_readSheetObjects_(shStripe, 1)
+    const orgSubscriptions = ALLSTATS_loadOrgSubscriptions_(shOrgSubscriptions)
+    const orgSubsIndex = ALLSTATS_buildOrgSubscriptionsIndex_(orgSubscriptions)
+    const stripeBySubId = ALLSTATS_buildStripeBySubId_(stripeRows)
     const manualBySubId = ALLSTATS_buildManualStripeChangesBySubId_(shManual)
-    const promoRedemptions = shPromoRedemptions
-      ? ALLSTATS_readSheetObjects_(shPromoRedemptions, 1)
-      : ALLSTATS_fetchPromoRedemptionsFallback_()
-    const promoCodes = shPromoCodes ? ALLSTATS_readSheetObjects_(shPromoCodes, 1) : []
+    const promoRedemptions = ALLSTATS_loadPromoRedemptions_(shPromoRedemptions)
+    const canonOrgs = ALLSTATS_readSheetObjects_(shCanonOrgs, 1)
 
     const clerkUsers = shUsers ? ALLSTATS_readSheetObjects_(shUsers, 1) : []
     const clerkMems = shMems ? ALLSTATS_readSheetObjects_(shMems, 1) : []
     const clerkOrgs = shOrgs ? ALLSTATS_readSheetObjects_(shOrgs, 1) : []
     const posthogUsers = shPosthog ? ALLSTATS_readSheetObjects_(shPosthog, 1) : []
 
-    const indexes = ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers)
+    const indexes = ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers, canonOrgs)
     const orgAggByKey = new Map()
 
     for (const row of stripeRows) {
-      const sub = ALLSTATS_normalizeSubscription_(row, manualBySubId, indexes)
+      const sub = ALLSTATS_normalizeSubscription_(row, manualBySubId, indexes, orgSubsIndex)
       if (!sub.include) continue
 
       const orgKey = ALLSTATS_orgKey_(sub)
@@ -80,15 +83,14 @@ function render_all_stats_view() {
     }
 
     const orgs = Array.from(orgAggByKey.values()).map(ALLSTATS_finalizeOrgAgg_)
-    const promoCodeById = ALLSTATS_buildPromoCodeLookupById_(promoCodes)
-    const promoRedemptionsByOrgId = ALLSTATS_buildPromoRedemptionByOrgId_(promoRedemptions, promoCodeById)
+    const promoRedemptionsByOrgId = ALLSTATS_buildPromoRedemptionByOrgId_(promoRedemptions)
     ALLSTATS_applyPromoEligibilityFromRedemptions_(orgs, promoRedemptionsByOrgId)
     orgs.sort((a, b) => {
       if (b.arr_total !== a.arr_total) return b.arr_total - a.arr_total
       return String(a.org_name || '').localeCompare(String(b.org_name || ''))
     })
 
-    const allMetrics = ALLSTATS_buildStageMetrics_(orgs)
+    const allMetrics = ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(orgSubscriptions, manualBySubId, stripeBySubId)
     const conversion = ALLSTATS_buildConversionMetrics_(orgs, clerkOrgs)
 
     const snapRows = shSnap ? ALLSTATS_readSheetObjects_(shSnap, 1) : []
@@ -123,7 +125,7 @@ function render_all_stats_view() {
   })
 }
 
-function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes) {
+function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes, orgSubsIndex) {
   const statusRaw = ALLSTATS_str_(r.status).toLowerCase()
   const hasPaymentMethod = ALLSTATS_toBool_(r.has_payment_method)
 
@@ -134,11 +136,7 @@ function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes) {
     ALLSTATS_str_(r.id)
 
   const manual = subId ? (manualBySubId.get(subId) || null) : null
-  const manualReason = manual ? manual.reason : ''
-  const manualQuantity = manual ? manual.quantity : 0
-  const manualTrialExtended = manual ? manual.trialExtendedDays : 0
-
-  if (manualReason && ALL_STATS_CFG.EXCLUDED_REASON_TERMS.some(term => manualReason.indexOf(term) >= 0)) {
+  if (manual && manual.excludeInternal) {
     return { include: false }
   }
 
@@ -154,9 +152,16 @@ function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes) {
   }
 
   const interval = ALLSTATS_str_(r.interval).toLowerCase()
+  const intervalCount = Math.max(1, ALLSTATS_num_(r.interval_count) || 1)
   const amountRaw = ALLSTATS_moneyAmount_(r.amount)
-  const amount = ALLSTATS_applyManualAmountOverride_(amountRaw, interval, manualReason, manualQuantity)
-  const mrrArr = ALLSTATS_computeMrrArr_(amount, interval)
+  const discountCtx = ALLSTATS_buildDiscountContextNow_(r, {
+    amountRaw,
+    interval,
+    intervalCount,
+    asOfDate: new Date()
+  })
+  const amount = discountCtx.amount
+  const mrrArr = ALLSTATS_computeMrrArr_(amount, interval, intervalCount)
 
   const seats = ALLSTATS_safeInt_(r.quantity_total)
 
@@ -170,19 +175,28 @@ function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes) {
   const stripeEmailKey = ALLSTATS_normalizeEmail_(stripeEmail)
 
   const resolved = ALLSTATS_resolveCustomer_(stripeEmailKey, subId, indexes)
+  const canonMatch = (subId && indexes && indexes.canonBySubId)
+    ? (indexes.canonBySubId.get(subId) || null)
+    : null
+  const orgSub = (orgSubsIndex && orgSubsIndex.bySubId) ? (orgSubsIndex.bySubId.get(subId) || null) : null
 
-  const customerEmail = resolved.email || stripeEmail
+  const customerEmail = resolved.email || stripeEmail || (canonMatch ? canonMatch.billingEmail : '')
   const customerName = resolved.customerName || ALLSTATS_str_(r.customer_name || r.name)
-  const orgName = resolved.orgName || ALLSTATS_str_(r.org_name || r.organization_name || r.org)
-  const orgId = resolved.orgId || ''
+  const orgId = ALLSTATS_str_(
+    (canonMatch && (canonMatch.appOrgId || canonMatch.orgId || canonMatch.clerkOrgId)) ||
+    (orgSub && (orgSub.app_org_id || orgSub.org_id)) ||
+    (resolved.appOrgId || resolved.orgId) ||
+    ''
+  )
+  const orgName =
+    (canonMatch && canonMatch.orgName) ||
+    (orgId && indexes && indexes.orgNameByOrgId && indexes.orgNameByOrgId.get(orgId)) ||
+    resolved.orgName ||
+    ALLSTATS_str_(r.org_name || r.organization_name || r.org)
 
-  const promoCode = ALLSTATS_str_(r.promo_code)
+  const promoCode = discountCtx.promoCodes.join(', ')
   const hasPromoCode = !!promoCode
-  const promoEvidence =
-    hasPromoCode ||
-    discountPercent > 0 ||
-    discountDurationMonths > 0 ||
-    (discountDuration && discountDuration !== 'once')
+  const promoEvidence = hasPromoCode || discountCtx.activeDiscountCount > 0
 
   return {
     include: true,
@@ -205,7 +219,7 @@ function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes) {
     discount_duration_months: discountDurationMonths,
     promo_code: promoCode,
     promo_evidence: promoEvidence,
-    trial_extended_days: manualTrialExtended,
+    trial_extended_days: 0,
 
     created_at: createdAtDate,
     first_payment_at: firstPaymentAtDate,
@@ -216,8 +230,6 @@ function ALLSTATS_normalizeSubscription_(r, manualBySubId, indexes) {
 
 function ALLSTATS_orgKey_(sub) {
   if (sub.org_id) return 'org:' + sub.org_id
-  if (sub.customer_email_key) return 'email:' + sub.customer_email_key
-  if (sub.org_name) return 'org_name:' + sub.org_name.toLowerCase()
   if (sub.sub_id) return 'sub:' + sub.sub_id
   return 'sub:unknown'
 }
@@ -384,6 +396,10 @@ function ALLSTATS_finalizeOrgAgg_(org) {
 
 function ALLSTATS_buildStageMetrics_(orgs) {
   const out = {
+    paidDefined: ALLSTATS_emptyMetric_(),
+    promoTrialDefined: ALLSTATS_emptyMetric_(),
+    freeTrialDefined: ALLSTATS_emptyMetric_(),
+
     paidPromo: ALLSTATS_emptyMetric_(),
     onlyPaidTrue: ALLSTATS_emptyMetric_(),
     onlyPromo: ALLSTATS_emptyMetric_(),
@@ -398,6 +414,37 @@ function ALLSTATS_buildStageMetrics_(orgs) {
   }
 
   for (const o of orgs) {
+    const hasFirstPayment = !!o.has_paid_us
+    const isActiveNoFirstPayment = !!(o.has_paid && !hasFirstPayment)
+    const hasAnyPromoUsage =
+      !!o.has_promo_conversion_eligible ||
+      !!o.has_promo_evidence ||
+      !!o.has_free_promo_evidence ||
+      !!ALLSTATS_str_(o.promo_codes_text) ||
+      !!ALLSTATS_str_(o.promo_redemption_codes_text) ||
+      !!ALLSTATS_str_(o.promo_redemption_code_ids_text) ||
+      Number(o.promo_redemption_count || 0) > 0
+    const trialArr = (Number(o.promo.arr || 0) + Number(o.free.arr || 0))
+    const trialMrr = (Number(o.promo.mrr || 0) + Number(o.free.mrr || 0))
+    const trialSeats = (Number(o.promo.seats || 0) + Number(o.free.seats || 0))
+
+    if (hasFirstPayment) {
+      out.paidDefined.arr += o.paid_true.arr
+      out.paidDefined.mrr += o.paid_true.mrr
+      out.paidDefined.firms += 1
+      out.paidDefined.seats += o.paid_true.seats
+    } else if (isActiveNoFirstPayment || hasAnyPromoUsage) {
+      out.promoTrialDefined.arr += trialArr
+      out.promoTrialDefined.mrr += trialMrr
+      out.promoTrialDefined.firms += 1
+      out.promoTrialDefined.seats += trialSeats
+    } else {
+      out.freeTrialDefined.arr += trialArr
+      out.freeTrialDefined.mrr += trialMrr
+      out.freeTrialDefined.firms += 1
+      out.freeTrialDefined.seats += trialSeats
+    }
+
     const onlyPaid = o.has_paid && !o.has_promo
     const onlyPaidTrue = onlyPaid && o.has_paid_us
     const onlyPromo = o.has_promo && !o.has_paid
@@ -469,6 +516,135 @@ function ALLSTATS_buildStageMetrics_(orgs) {
   return out
 }
 
+function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId, stripeBySubId) {
+  const out = {
+    paidDefined: ALLSTATS_emptyMetric_(),
+    promoTrialDefined: ALLSTATS_emptyMetric_(),
+    freeTrialDefined: ALLSTATS_emptyMetric_(),
+
+    paidPromo: ALLSTATS_emptyMetric_(),
+    onlyPaidTrue: ALLSTATS_emptyMetric_(),
+    onlyPromo: ALLSTATS_emptyMetric_(),
+    onlyPaid: ALLSTATS_emptyMetric_(),
+    onlyFree: ALLSTATS_emptyMetric_(),
+    stagePaid: { firms: 0, seats: 0 },
+    stagePromo: { firms: 0, seats: 0 },
+    stageFree: { firms: 0, seats: 0 },
+    paidStageTotals: { arr: 0, seats: 0, firms: 0 },
+    avgRevenuePerFirmPaid: 0,
+    avgRevenuePerSeat: 0,
+    avgSeatCountPerFirmPaid: 0
+  }
+
+  ;(rows || []).forEach(r => {
+    const subId =
+      ALLSTATS_str_(r.latest_subscription_id) ||
+      ALLSTATS_str_(r.stripe_subscription_id) ||
+      ALLSTATS_str_(r.subscription_id) ||
+      ALLSTATS_str_(r.id)
+    const manual = subId ? (manualBySubId && manualBySubId.get(subId)) : null
+    if (manual && manual.excludeInternal) return
+
+    const status = ALLSTATS_str_(r.status).toLowerCase()
+    const hasFirstPayment = !!ALLSTATS_str_(r.first_payment_at)
+    const hasPaymentMethod = ALLSTATS_toBool_(r.has_payment_method)
+    const bucket = ALLSTATS_bucketFromOrgSubscriptionInfo_(status, hasFirstPayment, hasPaymentMethod)
+    if (!bucket) return
+
+    const amountYearly = ALLSTATS_num_(r.amount_yearly)
+    const amount = ALLSTATS_num_(r.amount)
+    const interval = ALLSTATS_str_(r.interval).toLowerCase()
+    const intervalCount = Math.max(1, ALLSTATS_num_(r.interval_count) || 1)
+    const arrBase = amountYearly > 0
+      ? amountYearly
+      : ALLSTATS_computeMrrArr_(amount, interval, intervalCount).arr
+    let arr = arrBase
+    let mrr = arr / 12
+    const seats = ALLSTATS_safeInt_(r.quantity_total)
+
+    if (bucket === 'paid') {
+      const stripeRow = subId ? (stripeBySubId && stripeBySubId.get(subId)) : null
+      if (stripeRow) {
+        const rawInterval = ALLSTATS_str_(stripeRow.interval).toLowerCase()
+        const rawIntervalCount = Math.max(1, ALLSTATS_num_(stripeRow.interval_count) || 1)
+        const rawAmount = ALLSTATS_moneyAmount_(stripeRow.amount)
+        const discountCtx = ALLSTATS_buildDiscountContextNow_(stripeRow, {
+          amountRaw: rawAmount,
+          interval: rawInterval,
+          intervalCount: rawIntervalCount,
+          asOfDate: new Date()
+        })
+        const paidMrrArr = ALLSTATS_computeMrrArr_(discountCtx.amount, rawInterval, rawIntervalCount)
+        arr = paidMrrArr.arr
+        mrr = paidMrrArr.mrr
+      }
+    }
+
+    if (bucket === 'paid') {
+      out.paidDefined.arr += arr
+      out.paidDefined.mrr += mrr
+      out.paidDefined.firms += 1
+      out.paidDefined.seats += seats
+    } else if (bucket === 'intent_to_pay') {
+      out.promoTrialDefined.arr += arr
+      out.promoTrialDefined.mrr += mrr
+      out.promoTrialDefined.firms += 1
+      out.promoTrialDefined.seats += seats
+    } else if (bucket === 'free_trial') {
+      out.freeTrialDefined.arr += arr
+      out.freeTrialDefined.mrr += mrr
+      out.freeTrialDefined.firms += 1
+      out.freeTrialDefined.seats += seats
+    }
+  })
+
+  out.stagePaid.firms = out.paidDefined.firms
+  out.stagePaid.seats = out.paidDefined.seats
+  out.stagePromo.firms = out.promoTrialDefined.firms
+  out.stagePromo.seats = out.promoTrialDefined.seats
+  out.stageFree.firms = out.freeTrialDefined.firms
+  out.stageFree.seats = out.freeTrialDefined.seats
+  out.paidStageTotals.arr = out.paidDefined.arr
+  out.paidStageTotals.seats = out.paidDefined.seats
+  out.paidStageTotals.firms = out.paidDefined.firms
+
+  out.avgRevenuePerFirmPaid = out.paidStageTotals.firms
+    ? (out.paidStageTotals.arr / out.paidStageTotals.firms)
+    : 0
+
+  out.avgRevenuePerSeat = out.paidStageTotals.seats
+    ? (out.paidStageTotals.arr / out.paidStageTotals.seats)
+    : 0
+
+  out.avgSeatCountPerFirmPaid = out.paidStageTotals.firms
+    ? (out.paidStageTotals.seats / out.paidStageTotals.firms)
+    : 0
+
+  return out
+}
+
+function ALLSTATS_bucketFromOrgSubscriptionInfo_(status, hasFirstPayment, hasPaymentMethod) {
+  if (status === 'active' && hasFirstPayment) return 'paid'
+  if (status === 'active' && !hasFirstPayment) return 'intent_to_pay'
+  if (status === 'trialing' && hasPaymentMethod) return 'intent_to_pay'
+  if (status === 'trialing' && !hasPaymentMethod) return 'free_trial'
+  return ''
+}
+
+function ALLSTATS_buildStripeBySubId_(rows) {
+  const out = new Map()
+  ;(rows || []).forEach(r => {
+    const subId =
+      ALLSTATS_str_(r.stripe_subscription_id) ||
+      ALLSTATS_str_(r.subscription_id) ||
+      ALLSTATS_str_(r.subscription) ||
+      ALLSTATS_str_(r.id)
+    if (!subId || out.has(subId)) return
+    out.set(subId, r)
+  })
+  return out
+}
+
 function ALLSTATS_emptyMetric_() {
   return { arr: 0, mrr: 0, firms: 0, seats: 0 }
 }
@@ -480,63 +656,109 @@ function ALLSTATS_buildConversionMetrics_(orgs, clerkOrgs) {
   ).size
 
   let paidUs = 0
+  let signupTrialPotential = 0
   let promoPool = 0
   let promoToPaid = 0
+  let promoTrialPotential = 0
 
   for (const o of orgs) {
-    if (o.has_paid_us) paidUs += 1
+    const inTrialNow = !!(o.has_free || o.has_promo)
+    const hasFirstPayment = !!o.has_paid_us
+    const isActiveNoFirstPayment = !!(o.has_paid && !hasFirstPayment)
+    const hasAnyPromoUsage =
+      !!o.has_promo_conversion_eligible ||
+      !!o.has_promo_evidence ||
+      !!o.has_free_promo_evidence ||
+      !!ALLSTATS_str_(o.promo_codes_text) ||
+      !!ALLSTATS_str_(o.promo_redemption_codes_text) ||
+      !!ALLSTATS_str_(o.promo_redemption_code_ids_text) ||
+      Number(o.promo_redemption_count || 0) > 0
 
-    const inPromoPool = !!o.has_promo_conversion_eligible
+    if (o.has_paid_us) paidUs += 1
+    else if (inTrialNow) signupTrialPotential += 1
+
+    const inPromoPool = isActiveNoFirstPayment || hasAnyPromoUsage
     if (inPromoPool) {
       promoPool += 1
       if (o.has_paid_us) promoToPaid += 1
+      else promoTrialPotential += 1
     }
   }
+
+  const signupPotentialMaxRate = totalSignedUp
+    ? ((paidUs + signupTrialPotential) / totalSignedUp)
+    : 0
+
+  const promoPotentialMaxRate = promoPool
+    ? ((promoToPaid + promoTrialPotential) / promoPool)
+    : 0
 
   return {
     totalSignedUp,
     paidUs,
     signupToPaidRate: totalSignedUp ? (paidUs / totalSignedUp) : 0,
+    signupTrialPotential,
+    signupPotentialMaxRate,
     promoPool,
     promoToPaid,
-    promoToPaidRate: promoPool ? (promoToPaid / promoPool) : 0
+    promoToPaidRate: promoPool ? (promoToPaid / promoPool) : 0,
+    promoTrialPotential,
+    promoPotentialMaxRate
   }
 }
 
-function ALLSTATS_buildPromoCodeLookupById_(promoCodeRows) {
-  const out = new Map()
-  for (const r of (promoCodeRows || [])) {
-    const id = ALLSTATS_str_(r.id || r.promo_code_id || r.promocode_id)
-    if (!id) continue
-    const label =
-      ALLSTATS_str_(r.code) ||
-      ALLSTATS_str_(r.promo_code) ||
-      ALLSTATS_str_(r.name) ||
-      ALLSTATS_str_(r.display_name) ||
-      ALLSTATS_str_(r.slug) ||
-      id
-    out.set(id, label)
-  }
-  return out
+function ALLSTATS_loadPromoRedemptions_(sheetMaybe) {
+  if (!sheetMaybe) return []
+  return ALLSTATS_readSheetObjects_(sheetMaybe, 1)
 }
 
-function ALLSTATS_fetchPromoRedemptionsFallback_() {
-  if (typeof PRBACK_fetchPromoRedemptionsFromPosthog_ === 'function') {
-    try {
-      return PRBACK_fetchPromoRedemptionsFromPosthog_()
-    } catch (err) {
-      const msg = String(err && err.message ? err.message : err)
-      Logger.log('[ALLSTATS] promo_redemptions fallback failed: ' + msg)
-      return []
+function ALLSTATS_loadOrgSubscriptions_(sheetMaybe) {
+  if (!sheetMaybe) return []
+  return ALLSTATS_readSheetObjects_(sheetMaybe, 1)
+}
+
+function ALLSTATS_buildOrgSubscriptionsIndex_(rows) {
+  const bySubId = new Map()
+  const byOrgId = new Map()
+  const warnings = []
+
+  for (const r of (rows || [])) {
+    const subId = ALLSTATS_str_(r.stripe_subscription_id || r.subscription_id || r.id)
+    const orgId = ALLSTATS_str_(r.app_org_id || r.org_id)
+    if (!subId || !orgId) continue
+
+    if (!bySubId.has(subId)) bySubId.set(subId, r)
+    else warnings.push(`duplicate stripe_subscription_id in org_subscriptions: ${subId}`)
+
+    const prev = byOrgId.get(orgId)
+    if (!prev) byOrgId.set(orgId, r)
+    else {
+      const pick = ALLSTATS_pickLatestOrgSub_(prev, r)
+      byOrgId.set(orgId, pick)
+      warnings.push(`multiple subscriptions for org_id in org_subscriptions: ${orgId}`)
     }
   }
-  return []
+
+  if (warnings.length) {
+    Logger.log('[ALLSTATS] org_subscriptions warnings: ' + warnings.slice(0, 20).join(' | '))
+  }
+
+  return { bySubId, byOrgId }
+}
+
+function ALLSTATS_pickLatestOrgSub_(a, b) {
+  const aDate = ALLSTATS_toDateOrNull_(a.updated_at || a.created_at || a.trial_started_at || '')
+  const bDate = ALLSTATS_toDateOrNull_(b.updated_at || b.created_at || b.trial_started_at || '')
+  const aTs = aDate ? aDate.getTime() : 0
+  const bTs = bDate ? bDate.getTime() : 0
+  return bTs >= aTs ? b : a
 }
 
 function ALLSTATS_buildPromoRedemptionByOrgId_(promoRedemptions, promoCodeById) {
+  const promoLookup = promoCodeById instanceof Map ? promoCodeById : new Map()
   const byOrgId = new Map()
   for (const r of (promoRedemptions || [])) {
-    const orgId = ALLSTATS_str_(r.org_id)
+    const orgId = ALLSTATS_str_(r.app_org_id || r.org_id)
     if (!orgId) continue
 
     const promoCodeId = ALLSTATS_str_(r.promo_code_id || r.promocode_id || r.code_id)
@@ -544,7 +766,7 @@ function ALLSTATS_buildPromoRedemptionByOrgId_(promoRedemptions, promoCodeById) 
       ALLSTATS_str_(r.promo_code) ||
       ALLSTATS_str_(r.code) ||
       ALLSTATS_str_(r.promo_name) ||
-      (promoCodeId ? (promoCodeById.get(promoCodeId) || promoCodeId) : '')
+      (promoCodeId ? (promoLookup.get(promoCodeId) || promoCodeId) : '')
 
     const redeemedAt = ALLSTATS_toDateOrNull_(r.redeemed_at)
 
@@ -855,12 +1077,12 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
 
   row = ALLSTATS_writeSection_(sheet, row, 'ARR / MRR Summary (Org Level)')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Metric', 'Only Paid (True)', 'Only Paid', 'Paid + Promo Trial', 'Only Promo Trial', 'Only Free Trial'],
+    ['Metric', 'Paid', 'Intent to Pay', 'Trialing'],
     [
-      ['ARR', data.metrics.onlyPaidTrue.arr, data.metrics.onlyPaid.arr, data.metrics.paidPromo.arr, data.metrics.onlyPromo.arr, data.metrics.onlyFree.arr],
-      ['MRR', data.metrics.onlyPaidTrue.mrr, data.metrics.onlyPaid.mrr, data.metrics.paidPromo.mrr, data.metrics.onlyPromo.mrr, data.metrics.onlyFree.mrr],
-      ['Firms', data.metrics.onlyPaidTrue.firms, data.metrics.onlyPaid.firms, data.metrics.paidPromo.firms, data.metrics.onlyPromo.firms, data.metrics.onlyFree.firms],
-      ['Seats', data.metrics.onlyPaidTrue.seats, data.metrics.onlyPaid.seats, data.metrics.paidPromo.seats, data.metrics.onlyPromo.seats, data.metrics.onlyFree.seats]
+      ['ARR', data.metrics.paidDefined.arr, data.metrics.promoTrialDefined.arr, data.metrics.freeTrialDefined.arr],
+      ['MRR', data.metrics.paidDefined.mrr, data.metrics.promoTrialDefined.mrr, data.metrics.freeTrialDefined.mrr],
+      ['Firms', data.metrics.paidDefined.firms, data.metrics.promoTrialDefined.firms, data.metrics.freeTrialDefined.firms],
+      ['Seats', data.metrics.paidDefined.seats, data.metrics.promoTrialDefined.seats, data.metrics.freeTrialDefined.seats]
     ],
     {
       currencyRowsAcross: [1, 2],
@@ -870,22 +1092,36 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
 
   row = ALLSTATS_writeSection_(sheet, row, '# of Paying Firms / Seats by Stage')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Stage', 'Firms', 'Seats'],
+    ['Stage', 'Firms', 'Seats', 'Avg Seats / Firm'],
     [
-      ['Only Paid (True)', data.metrics.onlyPaidTrue.firms, data.metrics.onlyPaidTrue.seats],
-      ['Paid', data.metrics.stagePaid.firms, data.metrics.stagePaid.seats],
-      ['Promo Trial', data.metrics.stagePromo.firms, data.metrics.stagePromo.seats],
-      ['Free Trial', data.metrics.stageFree.firms, data.metrics.stageFree.seats]
+      [
+        'Paid',
+        data.metrics.paidDefined.firms,
+        data.metrics.paidDefined.seats,
+        data.metrics.paidDefined.firms ? (data.metrics.paidDefined.seats / data.metrics.paidDefined.firms) : 0
+      ],
+      [
+        'Intent to Pay',
+        data.metrics.promoTrialDefined.firms,
+        data.metrics.promoTrialDefined.seats,
+        data.metrics.promoTrialDefined.firms ? (data.metrics.promoTrialDefined.seats / data.metrics.promoTrialDefined.firms) : 0
+      ],
+      [
+        'Trialing',
+        data.metrics.freeTrialDefined.firms,
+        data.metrics.freeTrialDefined.seats,
+        data.metrics.freeTrialDefined.firms ? (data.metrics.freeTrialDefined.seats / data.metrics.freeTrialDefined.firms) : 0
+      ]
     ],
-    { intCols: [2, 3] }
+    { intCols: [2, 3], decimalCols: [4] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, 'Avg Revenue Metrics')
   row = ALLSTATS_writeTable_(sheet, row, 1,
     ['Metric', 'Value'],
     [
-      ['Avg revenue per firm (Paid)', data.metrics.avgRevenuePerFirmPaid],
-      ['Avg revenue per seat (Paid)', data.metrics.avgRevenuePerSeat],
+      ['Avg ARR per firm (Paid)', data.metrics.avgRevenuePerFirmPaid],
+      ['Avg ARR per seat (Paid)', data.metrics.avgRevenuePerSeat],
       ['Avg seat count per firm (Paid)', data.metrics.avgSeatCountPerFirmPaid]
     ],
     { currencyRows: [1, 2], intRows: [3] }
@@ -893,15 +1129,25 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
 
   row = ALLSTATS_writeSection_(sheet, row, 'Conversion + Retention')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Metric', 'Value', 'Detail'],
+    ['Metric', 'Value', 'Detail', 'Potential'],
     [
-      ['Sign up to paid conversion', data.conversion.signupToPaidRate, data.conversion.paidUs + ' / ' + data.conversion.totalSignedUp],
-      ['Promo trial to paid conversion', data.conversion.promoToPaidRate, data.conversion.promoToPaid + ' / ' + data.conversion.promoPool],
-      ['NRR (latest snapshot)', data.retention.nrr, data.retention.latest_snapshot || ''],
-      ['GRR (latest snapshot)', data.retention.grr, data.retention.latest_snapshot || ''],
-      ['Logo churn rate', data.retention.logo_churn_rate, data.retention.churned_orgs + ' churned / ' + data.retention.base_orgs + ' base'],
-      ['Gross ARR churn rate', data.retention.gross_arr_churn_rate, 'Base ARR ' + ALLSTATS_fmtMoney_(data.retention.base_bom_arr)],
-      ['Full ARR churn rate', data.retention.full_arr_churn_rate, 'Churned ARR ' + ALLSTATS_fmtMoney_(data.retention.churned_arr)]
+      [
+        'Sign up to paid conversion',
+        data.conversion.signupToPaidRate,
+        data.conversion.paidUs + ' / ' + data.conversion.totalSignedUp,
+        data.conversion.signupTrialPotential + ' trialing | max ' + ALLSTATS_fmtPct_(data.conversion.signupPotentialMaxRate)
+      ],
+      [
+        'Promo trial to paid conversion',
+        data.conversion.promoToPaidRate,
+        data.conversion.promoToPaid + ' / ' + data.conversion.promoPool,
+        data.conversion.promoTrialPotential + ' not yet paid | max ' + ALLSTATS_fmtPct_(data.conversion.promoPotentialMaxRate)
+      ],
+      ['NRR (latest snapshot)', data.retention.nrr, data.retention.latest_snapshot || '', ''],
+      ['GRR (latest snapshot)', data.retention.grr, data.retention.latest_snapshot || '', ''],
+      ['Logo churn rate', data.retention.logo_churn_rate, data.retention.churned_orgs + ' churned / ' + data.retention.base_orgs + ' base', ''],
+      ['Gross ARR churn rate', data.retention.gross_arr_churn_rate, 'Base ARR ' + ALLSTATS_fmtMoney_(data.retention.base_bom_arr), ''],
+      ['Full ARR churn rate', data.retention.full_arr_churn_rate, 'Churned ARR ' + ALLSTATS_fmtMoney_(data.retention.churned_arr), '']
     ],
     { pctRows: [1, 2, 3, 4, 5, 6, 7] }
   )
@@ -957,7 +1203,7 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
     { currencyCols: [4, 5, 6, 7, 8] }
   )
 
-  row = ALLSTATS_writeSection_(sheet, row, 'Free Trial (First 14 Days, No Promo Code)')
+  row = ALLSTATS_writeSection_(sheet, row, 'Trialing (No Payment Method)')
   row = ALLSTATS_writeTable_(sheet, row, 1,
     ['Org ID', 'Org Name', 'Customer Name', 'Customer Email', 'Days in Trial', 'Seats', 'MRR', 'ARR', 'Subscriptions', 'Subscription IDs'],
     data.freeTrialList,
@@ -992,6 +1238,8 @@ function ALLSTATS_writeTitle_(sheet, startRow, title, generatedAt) {
     .setFontSize(18)
     .setBackground(ALL_STATS_CFG.TITLE_BG)
     .setFontColor(ALL_STATS_CFG.TITLE_FG)
+    .setHorizontalAlignment('center')
+    .setVerticalAlignment('middle')
 
   sheet.getRange(startRow + 1, 1, 1, 10).merge()
   sheet.getRange(startRow + 1, 1).setValue('Generated at: ' + generated)
@@ -1063,6 +1311,7 @@ function ALLSTATS_applyTableFormats_(sheet, row, col, numRows, numCols, opts) {
 
   applyCols(options.currencyCols, ALL_STATS_CFG.CURRENCY_FMT)
   applyCols(options.intCols, ALL_STATS_CFG.INT_FMT)
+  applyCols(options.decimalCols, ALL_STATS_CFG.DECIMAL_FMT)
   applyCols(options.pctCols, ALL_STATS_CFG.PCT_FMT)
   applyCols(options.datetimeCols, ALL_STATS_CFG.DATETIME_FMT)
   applyCols(options.dateCols, ALL_STATS_CFG.DATE_FMT)
@@ -1082,13 +1331,40 @@ function ALLSTATS_classifyStage_(statusRaw, hasPaymentMethod) {
   return ''
 }
 
-function ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers) {
+function ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers, canonOrgs) {
   const orgNameByOrgId = new Map()
   for (const o of (clerkOrgs || [])) {
     const orgId = ALLSTATS_str_(o.org_id)
     if (!orgId) continue
     const name = ALLSTATS_str_(o.org_name) || ALLSTATS_str_(o.org_slug)
     if (name) orgNameByOrgId.set(orgId, name)
+  }
+
+  const canonBySubId = new Map()
+  const canonByOrgId = new Map()
+  const canonByClerkOrgId = new Map()
+  for (const c of (canonOrgs || [])) {
+    const appOrgId = ALLSTATS_str_(c.app_org_id)
+    const clerkOrgId = ALLSTATS_str_(c.clerk_org_id || c.org_id)
+    const orgId = appOrgId || clerkOrgId
+    if (!orgId && !clerkOrgId) continue
+
+    const orgName = ALLSTATS_str_(c.org_name || c.org_slug)
+    const billingEmail = ALLSTATS_str_(c.billing_email)
+    if (orgId) canonByOrgId.set(orgId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail })
+    if (clerkOrgId) canonByClerkOrgId.set(clerkOrgId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail })
+    if (orgName) {
+      if (orgId) orgNameByOrgId.set(orgId, orgName)
+      if (clerkOrgId) orgNameByOrgId.set(clerkOrgId, orgName)
+      if (appOrgId) orgNameByOrgId.set(appOrgId, orgName)
+    }
+
+    const subIds = ALLSTATS_csvList_(c.stripe_subscription_ids)
+    for (const subIdRaw of subIds) {
+      const subId = ALLSTATS_str_(subIdRaw)
+      if (!subId || canonBySubId.has(subId)) continue
+      canonBySubId.set(subId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail })
+    }
   }
 
   const membershipsByEmailKey = new Map()
@@ -1146,6 +1422,9 @@ function ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers) 
   }
 
   return {
+    canonBySubId,
+    canonByOrgId,
+    canonByClerkOrgId,
     orgNameByOrgId,
     membershipsByEmailKey,
     usersByStripeSubId,
@@ -1175,7 +1454,7 @@ function ALLSTATS_resolveCustomer_(stripeEmailKey, stripeSubscriptionId, idx) {
     candidates = [idx.usersByEmailKey.get(stripeEmailKey)]
   }
 
-  if (!candidates.length) return { email: '', customerName: '', orgName: '', orgId: '' }
+  if (!candidates.length) return { email: '', customerName: '', orgName: '', orgId: '', appOrgId: '' }
 
   let filtered = candidates
   if (stripeEmailKey) {
@@ -1205,13 +1484,24 @@ function ALLSTATS_resolveCustomer_(stripeEmailKey, stripeSubscriptionId, idx) {
 
   if (!orgId && picked.orgId) orgId = picked.orgId
 
-  const orgName = orgId ? (idx.orgNameByOrgId.get(orgId) || '') : ''
+  let appOrgId = ''
+  if (orgId && idx.canonByOrgId && idx.canonByOrgId.has(orgId)) {
+    const canon = idx.canonByOrgId.get(orgId)
+    appOrgId = ALLSTATS_str_(canon && canon.appOrgId)
+  } else if (orgId && idx.canonByClerkOrgId && idx.canonByClerkOrgId.has(orgId)) {
+    const canon = idx.canonByClerkOrgId.get(orgId)
+    appOrgId = ALLSTATS_str_(canon && canon.appOrgId)
+  }
+  const orgName =
+    (appOrgId ? (idx.orgNameByOrgId.get(appOrgId) || '') : '') ||
+    (orgId ? (idx.orgNameByOrgId.get(orgId) || '') : '')
 
   return {
     email: picked.email || '',
     customerName: picked.name || '',
     orgName,
-    orgId
+    orgId,
+    appOrgId
   }
 }
 
@@ -1228,59 +1518,26 @@ function ALLSTATS_buildManualStripeChangesBySubId_(sheet) {
 
     if (!subId) continue
 
-    const reason = ALLSTATS_pickManualReason_(r)
-
-    const quantityRaw =
-      (r.quantity != null && r.quantity !== '') ? r.quantity :
-      (r.free_seats_quantity != null && r.free_seats_quantity !== '') ? r.free_seats_quantity :
-      ''
-
-    const quantityNum = Number(quantityRaw)
-    const quantity = (isFinite(quantityNum) && quantityNum > 0) ? Math.floor(quantityNum) : 0
-    const trialExtendedRaw = (r.trial_extended != null && r.trial_extended !== '') ? r.trial_extended : ''
-    const trialExtendedNum = Number(trialExtendedRaw)
-    const trialExtendedDays = (isFinite(trialExtendedNum) && trialExtendedNum > 0)
-      ? Math.floor(trialExtendedNum)
-      : 0
-
-    if (!reason && !trialExtendedDays) continue
-
-    if (!out.has(subId)) out.set(subId, { reason, quantity, trialExtendedDays })
+    const excludeReason = ALLSTATS_str_(r.exclude_reason).toLowerCase()
+    if (excludeReason !== 'internal') continue
+    out.set(subId, { excludeInternal: true })
   }
 
   return out
 }
 
-function ALLSTATS_pickManualReason_(row) {
-  const cancelReason = ALLSTATS_str_(row.cancel_reason).toLowerCase()
-  if (cancelReason) return cancelReason
-
-  const excludeReason = ALLSTATS_str_(row.exclude_reason).toLowerCase()
-  if (excludeReason) return excludeReason
-
-  return ALLSTATS_str_(row.free_seats || row.free_seat).toLowerCase()
-}
-
-function ALLSTATS_applyManualAmountOverride_(amount, interval, reason, quantity) {
+function ALLSTATS_computeMrrArr_(amount, interval, intervalCount) {
   const amt = Number(amount || 0) || 0
   const intv = String(interval || '').toLowerCase().trim()
-  const why = String(reason || '').toLowerCase().trim()
-
-  const qtyNum = Number(quantity)
-  const qty = (isFinite(qtyNum) && qtyNum > 0) ? Math.floor(qtyNum) : 0
-
-  if (why.indexOf('free seat') < 0) return amt
-  if (!qty) return amt
-
-  if (intv === 'month') return Math.max(0, amt - (ALL_STATS_CFG.FREE_SEAT_MONTHLY_DISCOUNT * qty))
-  if (intv === 'year') return Math.max(0, amt - (ALL_STATS_CFG.FREE_SEAT_YEARLY_DISCOUNT * qty))
-  return amt
-}
-
-function ALLSTATS_computeMrrArr_(amount, interval) {
-  const amt = Number(amount || 0) || 0
-  const intv = String(interval || '').toLowerCase().trim()
-  if (intv === 'year' || intv === 'annual' || intv === 'yr') return { arr: amt, mrr: amt / 12 }
+  const count = Math.max(1, Number(intervalCount || 1) || 1)
+  if (intv === 'year' || intv === 'annual' || intv === 'yr') {
+    const arr = amt / count
+    return { arr, mrr: arr / 12 }
+  }
+  if (intv === 'month' || intv === 'mo') {
+    const arr = amt * (12 / count)
+    return { mrr: arr / 12, arr }
+  }
   return { mrr: amt, arr: amt * 12 }
 }
 
@@ -1289,6 +1546,142 @@ function ALLSTATS_moneyAmount_(v) {
   const n = ALLSTATS_num_(v)
   if (!isFinite(n)) return 0
   return Math.round(n * 100) / 100
+}
+
+function ALLSTATS_buildDiscountContextNow_(row, opts) {
+  const cfg = opts || {}
+  const amountRaw = ALLSTATS_moneyAmount_(cfg.amountRaw)
+  const asOfDate = (cfg.asOfDate instanceof Date && !isNaN(cfg.asOfDate.getTime()))
+    ? cfg.asOfDate
+    : new Date()
+
+  const details = ALLSTATS_parseDiscountDetails_(row)
+  const active = details.filter(d => ALLSTATS_isDiscountActiveNow_(d, asOfDate))
+
+  let amount = amountRaw
+  const promoCodes = []
+  for (const d of active) {
+    const pct = ALLSTATS_num_(d.percent_off)
+    if (pct > 0) {
+      const bounded = Math.max(0, Math.min(100, pct))
+      amount *= (1 - bounded / 100)
+    }
+    const amountOff = ALLSTATS_num_(d.amount_off)
+    if (amountOff > 0) amount -= amountOff
+    const promo = ALLSTATS_str_(d.promotion_code)
+    if (promo) promoCodes.push(promo)
+  }
+
+  return {
+    amount: Math.max(0, amount),
+    promoCodes: Array.from(new Set(promoCodes)),
+    activeDiscountCount: active.length
+  }
+}
+
+function ALLSTATS_parseDiscountDetails_(row) {
+  const out = []
+  const r = row || {}
+
+  const detailsJson = ALLSTATS_str_(r.discount_details_json)
+  if (detailsJson) {
+    try {
+      const parsed = JSON.parse(detailsJson)
+      if (Array.isArray(parsed)) {
+        parsed.forEach((d, i) => {
+          if (!d || typeof d !== 'object') return
+          out.push({
+            index: i + 1,
+            percent_off: ALLSTATS_num_(d.percent_off),
+            amount_off: ALLSTATS_num_(d.amount_off),
+            duration: ALLSTATS_str_(d.duration).toLowerCase(),
+            duration_in_months: ALLSTATS_num_(d.duration_in_months),
+            start_at: ALLSTATS_str_(d.start_at),
+            end_at: ALLSTATS_str_(d.end_at),
+            promotion_code: ALLSTATS_str_(d.promotion_code)
+          })
+        })
+      }
+    } catch (e) {}
+  }
+  if (out.length) return out
+
+  const pctAll = ALLSTATS_csvList_(r.discount_percent_all)
+  const amtAll = ALLSTATS_csvList_(r.discount_amount_off_all)
+  const durAll = ALLSTATS_csvList_(r.discount_duration_all)
+  const durMonthsAll = ALLSTATS_csvList_(r.discount_duration_months_all)
+  const startAll = ALLSTATS_csvList_(r.discount_start_at_all)
+  const endAll = ALLSTATS_csvList_(r.discount_end_at_all)
+  const promoAll = ALLSTATS_csvList_(r.promo_code_all)
+  const n = Math.max(
+    pctAll.length,
+    amtAll.length,
+    durAll.length,
+    durMonthsAll.length,
+    startAll.length,
+    endAll.length,
+    promoAll.length
+  )
+  for (let i = 0; i < n; i++) {
+    out.push({
+      index: i + 1,
+      percent_off: ALLSTATS_num_(pctAll[i]),
+      amount_off: ALLSTATS_num_(amtAll[i]),
+      duration: ALLSTATS_str_(durAll[i]).toLowerCase(),
+      duration_in_months: ALLSTATS_num_(durMonthsAll[i]),
+      start_at: ALLSTATS_str_(startAll[i]),
+      end_at: ALLSTATS_str_(endAll[i]),
+      promotion_code: ALLSTATS_str_(promoAll[i])
+    })
+  }
+  if (out.length) return out
+
+  const pct = ALLSTATS_num_(r.discount_percent)
+  const amt = ALLSTATS_num_(r.discount_amount_off)
+  const duration = ALLSTATS_str_(r.discount_duration).toLowerCase()
+  const durationMonths = ALLSTATS_num_(r.discount_duration_months)
+  if (pct <= 0 && amt <= 0) return []
+
+  return [{
+    index: 1,
+    percent_off: pct,
+    amount_off: amt,
+    duration,
+    duration_in_months: durationMonths,
+    start_at: ALLSTATS_str_(r.discount_start_at || r.first_payment_at || r.created_at),
+    end_at: ALLSTATS_str_(r.discount_end_at),
+    promotion_code: ALLSTATS_str_(r.promo_code)
+  }]
+}
+
+function ALLSTATS_isDiscountActiveNow_(detail, asOfDate) {
+  const asOf = (asOfDate instanceof Date && !isNaN(asOfDate.getTime()))
+    ? asOfDate
+    : new Date()
+  const d = detail || {}
+  const start = ALLSTATS_toDateOrNull_(d.start_at)
+  const end = ALLSTATS_toDateOrNull_(d.end_at)
+  const duration = ALLSTATS_str_(d.duration).toLowerCase()
+  const hasValue = ALLSTATS_num_(d.percent_off) > 0 || ALLSTATS_num_(d.amount_off) > 0
+  if (!hasValue) return false
+
+  if (start && asOf < start) return false
+  if (end) return asOf < end
+  if (duration === 'forever') return true
+  if (duration === 'repeating' || duration === 'once') {
+    if (!start) return false
+    const months = Math.max(1, ALLSTATS_num_(d.duration_in_months) || 1)
+    const until = new Date(start.getTime())
+    until.setUTCMonth(until.getUTCMonth() + months)
+    return asOf < until
+  }
+  return false
+}
+
+function ALLSTATS_csvList_(v) {
+  const s = ALLSTATS_str_(v)
+  if (!s) return []
+  return s.split(',').map(x => ALLSTATS_str_(x))
 }
 
 function ALLSTATS_toDateOrNull_(v) {
@@ -1365,6 +1758,12 @@ function ALLSTATS_fmtMoney_(n) {
   const x = Number(n || 0)
   if (!isFinite(x)) return '$0.00'
   return '$' + x.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function ALLSTATS_fmtPct_(n) {
+  const x = Number(n || 0)
+  if (!isFinite(x)) return '0.0%'
+  return (x * 100).toFixed(1) + '%'
 }
 
 function ALLSTATS_getOrCreateSheet_(ss, name) {
