@@ -3,6 +3,7 @@
  *
  * Creates/overwrites:
  *  - raw_stripe_subscriptions
+ *  - raw_stripe_subscription_items
  *
  * Uses Script Property:
  *  - STRIPE_KEY
@@ -15,6 +16,9 @@
  *    - invoice.subscription
  *    - invoice.parent.subscription_details.subscription
  *    - invoice.lines.data[].parent.*.subscription
+ * 5) ✅ Item-level detail: pulls per-item discounts, computes
+ *    amount_after_discounts at the item level then sums
+ * 6) ✅ Writes raw_stripe_subscription_items (one row per item)
  *
  * Notes:
  * - If your paid-invoice history is huge, tune lookback + caps.
@@ -27,7 +31,8 @@ const STRIPE_RAW_CFG = {
   WRITE_CHUNK: 2000,
 
   SHEETS: {
-    SUBSCRIPTIONS: 'raw_stripe_subscriptions'
+    SUBSCRIPTIONS: 'raw_stripe_subscriptions',
+    ITEMS: 'raw_stripe_subscription_items'
   }
 }
 
@@ -101,7 +106,34 @@ function stripe_pull_subscriptions_to_raw() {
     'canceled_at',
 
     'metadata_json',
-    'metadata_exclude_from_ring'
+    'metadata_exclude_from_ring',
+
+    // ── Item-level + discount-adjusted columns (Phase 1) ──
+    'item_count',
+    'amount_after_discounts',
+    'amount_after_discounts_monthly',
+    'amount_after_discounts_yearly',
+    'items_json'
+  ]
+
+  const itemHeaders = [
+    'stripe_subscription_id',
+    'stripe_subscription_item_id',
+    'product_id',
+    'product_name',
+    'price_id',
+    'currency',
+    'interval',
+    'interval_count',
+    'quantity',
+    'unit_amount',
+    'item_amount',
+    'item_discount_count',
+    'item_discount_details_json',
+    'item_amount_after_discounts',
+    'item_amount_after_all_discounts',
+    'item_arr',
+    'item_mrr'
   ]
 
   // 1) Fetch subscriptions (expanded customer + discounts)
@@ -118,9 +150,11 @@ function stripe_pull_subscriptions_to_raw() {
   })
 
   // 3) Collect discount coupon ids + promotion code ids for lookup
+  //    Scans BOTH subscription-level AND item-level discounts
   const couponIds = new Set()
   const promoIds = new Set()
   const paymentMethodIds = new Set()
+  const productIds = new Set()
 
   subs.forEach(sub => {
     const customerObj = (sub && sub.customer && typeof sub.customer === 'object') ? sub.customer : null
@@ -131,6 +165,7 @@ function stripe_pull_subscriptions_to_raw() {
     if (subDefaultPmId && /^pm_/.test(subDefaultPmId)) paymentMethodIds.add(subDefaultPmId)
     if (customerDefaultPmId && /^pm_/.test(customerDefaultPmId)) paymentMethodIds.add(customerDefaultPmId)
 
+    // Subscription-level discounts
     const discountsArr = stripeNormalizeDiscounts_(sub)
     discountsArr.forEach(d => {
       const couponId = stripeExtractCouponIdFromDiscount_(d)
@@ -138,13 +173,32 @@ function stripe_pull_subscriptions_to_raw() {
       if (couponId) couponIds.add(String(couponId))
       if (promoId) promoIds.add(String(promoId))
     })
+
+    // Item-level discounts + product IDs
+    const items = sub.items && sub.items.data ? sub.items.data : []
+    items.forEach(it => {
+      const pid = it.price && stripeExtractId_(it.price.product)
+      if (pid) productIds.add(String(pid))
+
+      const itemDiscounts = stripeNormalizeDiscounts_(it)
+      itemDiscounts.forEach(d => {
+        const couponId = stripeExtractCouponIdFromDiscount_(d)
+        const promoId = stripeExtractPromotionCodeIdFromDiscount_(d)
+        if (couponId) couponIds.add(String(couponId))
+        if (promoId) promoIds.add(String(promoId))
+      })
+    })
   })
 
   const couponMap = stripeFetchCouponsMap_(apiKey, Array.from(couponIds))
   const promoMap = stripeFetchPromotionCodesMap_(apiKey, Array.from(promoIds))
   const paymentMethodMap = stripeFetchPaymentMethodsMap_(apiKey, Array.from(paymentMethodIds))
+  const productMap = stripeFetchProductsMap_(apiKey, Array.from(productIds))
 
-  // 4) Build rows
+  // 4) Build rows (subscription + item detail)
+  const allItemRows = []
+  const asOfNow = new Date()
+
   const rows = subs.map(sub => {
     const subId = strOrBlank_(sub.id)
     const firstPaymentAt = firstPaidBySubId.get(subId) || ''
@@ -156,6 +210,13 @@ function stripe_pull_subscriptions_to_raw() {
     let interval = ''
     let intervalCount = 1
     let unitCents = null
+
+    // Item-level detail for items_json + raw_stripe_subscription_items
+    const itemDetails = []
+
+    // Subscription-level active discounts (applied after item discounts)
+    const subDiscountsArr = stripeNormalizeDiscounts_(sub)
+    const subActiveDiscounts = stripeFilterActiveDiscounts_(subDiscountsArr, couponMap, currency, asOfNow)
 
     const items = sub.items && sub.items.data ? sub.items.data : []
     items.forEach((it, idx) => {
@@ -172,14 +233,80 @@ function stripe_pull_subscriptions_to_raw() {
         intervalCount = Number(price.recurring.interval_count || 1)
       }
 
-      if (price.unit_amount != null) {
-        if (idx === 0) unitCents = Number(price.unit_amount)
-        totalCents += Number(price.unit_amount) * qty
-      }
+      const itemUnitCents = price.unit_amount != null ? Number(price.unit_amount) : 0
+      if (idx === 0) unitCents = itemUnitCents
+      totalCents += itemUnitCents * qty
+
+      const itemAmount = itemUnitCents * qty / 100
+      const itemUnitAmount = itemUnitCents / 100
+
+      // Item-level discounts
+      const itemDiscountsArr = stripeNormalizeDiscounts_(it)
+      const itemActiveDiscounts = stripeFilterActiveDiscounts_(itemDiscountsArr, couponMap, currency, asOfNow)
+      const itemDiscountDetails = stripeSerializeDiscountDetails_(itemDiscountsArr, couponMap, promoMap, currency)
+
+      // Apply item-level discounts to get item_amount_after_item_discounts
+      const itemAmountAfterItemDiscounts = stripeApplyDiscounts_(itemAmount, itemActiveDiscounts)
+
+      // Apply subscription-level discounts on top to get final item amount
+      const itemAmountAfterAll = stripeApplyDiscounts_(itemAmountAfterItemDiscounts, subActiveDiscounts)
+
+      // Per-item interval for ARR/MRR
+      const itemInterval = (price.recurring && price.recurring.interval)
+        ? String(price.recurring.interval) : interval
+      const itemIntervalCount = (price.recurring && price.recurring.interval_count)
+        ? Number(price.recurring.interval_count) : intervalCount
+      const itemMonths = itemInterval === 'month' ? (itemIntervalCount || 1)
+        : itemInterval === 'year' ? (itemIntervalCount || 1) * 12
+        : null
+      const itemArr = itemMonths ? itemAmountAfterAll * (12 / itemMonths) : itemAmountAfterAll * 12
+      const itemMrr = itemArr / 12
+
+      const productId = stripeExtractId_(price.product)
+      const productName = productId ? strOrBlank_((productMap[productId] || {}).name) : ''
+
+      itemDetails.push({
+        item_id: strOrBlank_(it.id),
+        product_id: productId,
+        product_name: productName,
+        price_id: stripeExtractId_(price.id || price),
+        quantity: qty,
+        unit_amount: itemUnitAmount,
+        item_amount: itemAmount,
+        item_discount_count: itemDiscountsArr.length,
+        item_amount_after_discounts: itemAmountAfterItemDiscounts,
+        item_amount_after_all_discounts: itemAmountAfterAll,
+        item_arr: itemArr,
+        item_mrr: itemMrr
+      })
+
+      // Build row for raw_stripe_subscription_items sheet
+      allItemRows.push([
+        subId,
+        strOrBlank_(it.id),
+        productId,
+        productName,
+        stripeExtractId_(price.id || price),
+        String(price.currency || currency || '').toUpperCase(),
+        itemInterval,
+        itemIntervalCount || 1,
+        qty,
+        itemUnitAmount,
+        itemAmount,
+        itemDiscountsArr.length,
+        stripeSafeJson_(itemDiscountDetails),
+        itemAmountAfterItemDiscounts,
+        itemAmountAfterAll,
+        itemArr,
+        itemMrr
+      ])
     })
 
     const unitPrice = unitCents != null ? unitCents / 100 : ''
     const amount = totalCents ? totalCents / 100 : ''
+
+    // Discount-adjusted total: sum of per-item post-discount amounts
+    const amountAfterDiscounts = itemDetails.reduce((sum, it) => sum + it.item_amount_after_all_discounts, 0)
 
     // normalize monthly/yearly
     let months = null
@@ -190,6 +317,8 @@ function stripe_pull_subscriptions_to_raw() {
     let unitYearly = ''
     let amountMonthly = ''
     let amountYearly = ''
+    let amountAfterDiscountsMonthly = ''
+    let amountAfterDiscountsYearly = ''
 
     if (months && unitPrice !== '') {
       unitMonthly = unitPrice / months
@@ -198,6 +327,13 @@ function stripe_pull_subscriptions_to_raw() {
     if (months && amount !== '') {
       amountMonthly = amount / months
       amountYearly = amount * (12 / months)
+    }
+    if (months) {
+      amountAfterDiscountsMonthly = amountAfterDiscounts / months
+      amountAfterDiscountsYearly = amountAfterDiscounts * (12 / months)
+    } else {
+      amountAfterDiscountsMonthly = amountAfterDiscounts
+      amountAfterDiscountsYearly = amountAfterDiscounts * 12
     }
 
     // customer
@@ -388,15 +524,27 @@ function stripe_pull_subscriptions_to_raw() {
       stripeUnixToIso_(sub.canceled_at),
 
       metadataJson,
-      mdExclude
+      mdExclude,
+
+      // ── Item-level + discount-adjusted columns ──
+      items.length,
+      amountAfterDiscounts,
+      amountAfterDiscountsMonthly,
+      amountAfterDiscountsYearly,
+      stripeSafeJson_(itemDetails)
     ]
   })
 
   stripeOverwriteSheet_(sh, headers, rows)
 
+  // Write items sheet
+  const shItems = getOrCreateSheetSafe_(ss, STRIPE_RAW_CFG.SHEETS.ITEMS)
+  stripeOverwriteSheet_(shItems, itemHeaders, allItemRows)
+
   const seconds = (new Date() - t0) / 1000
-  writeSyncLogSafe_('stripe_pull_subscriptions_to_raw', 'ok', subs.length, rows.length, seconds, '')
-  return { rows_in: subs.length, rows_out: rows.length, excluded: 0 }
+  writeSyncLogSafe_('stripe_pull_subscriptions_to_raw', 'ok', subs.length, rows.length, seconds,
+    'items_rows=' + allItemRows.length)
+  return { rows_in: subs.length, rows_out: rows.length, item_rows: allItemRows.length }
 }
 
 function stripe_pull_all_raw() {
@@ -557,7 +705,8 @@ function stripeFetchAllSubscriptionsExpanded_(apiKey) {
       `?limit=${STRIPE_RAW_CFG.PAGE_LIMIT}` +
       `&status=all` +
       `&expand[]=data.customer` +
-      `&expand[]=data.discounts`
+      `&expand[]=data.discounts` +
+      `&expand[]=data.items.data.discounts`
 
     if (startingAfter) url += `&starting_after=${encodeURIComponent(startingAfter)}`
 
@@ -764,6 +913,154 @@ function stripeOverwriteSheet_(sheet, headers, rows) {
   }
 
   sheet.autoResizeColumns(1, headers.length)
+}
+
+/* =========================
+ * Discount computation helpers
+ * ========================= */
+
+/**
+ * Filter an array of raw Stripe discount objects down to only those
+ * that are currently active (based on start/end/duration).
+ */
+function stripeFilterActiveDiscounts_(discountsArr, couponMap, currency, asOfDate) {
+  const asOf = (asOfDate instanceof Date && !isNaN(asOfDate.getTime())) ? asOfDate : new Date()
+  const out = []
+
+  for (const d of (discountsArr || [])) {
+    const couponId = stripeExtractCouponIdFromDiscount_(d)
+    const couponObj = stripeExtractCouponObjectFromDiscount_(d)
+    const c = (couponId && couponMap[String(couponId)]) || couponObj || null
+    if (!c) continue
+
+    const pct = c.percent_off != null ? Number(c.percent_off) : 0
+    const amtOffMinor = c.amount_off != null ? Number(c.amount_off) : 0
+    const amtOff = amtOffMinor > 0 ? stripeMinorUnitsToMajor_(amtOffMinor, c.currency || currency) : 0
+    if (pct <= 0 && amtOff <= 0) continue
+
+    const dur = String(c.duration || '').toLowerCase()
+    const durMonths = Number(c.duration_in_months || 0)
+
+    const startTs = d.start ? Number(d.start) : 0
+    const endTs = d.end ? Number(d.end) : 0
+    const startDate = startTs > 0 ? new Date(startTs * 1000) : null
+    const endDate = endTs > 0 ? new Date(endTs * 1000) : null
+
+    // Check if active now
+    if (startDate && asOf < startDate) continue
+    if (endDate && asOf >= endDate) continue
+
+    if (dur === 'forever') {
+      // always active (no end check beyond the explicit end above)
+    } else if (dur === 'repeating' || dur === 'once') {
+      if (!startDate) continue
+      const until = new Date(startDate.getTime())
+      until.setUTCMonth(until.getUTCMonth() + Math.max(1, durMonths || 1))
+      if (asOf >= until) continue
+    } else {
+      // Unknown duration type — skip
+      continue
+    }
+
+    out.push({ percent_off: pct, amount_off: amtOff, duration: dur })
+  }
+
+  return out
+}
+
+/**
+ * Apply a list of active discounts to a dollar amount.
+ * Percent discounts first (multiplicative), then amount-off (subtractive).
+ */
+function stripeApplyDiscounts_(amount, activeDiscounts) {
+  let result = Number(amount || 0)
+  for (const d of (activeDiscounts || [])) {
+    if (d.percent_off > 0) {
+      result *= (1 - Math.min(100, d.percent_off) / 100)
+    }
+  }
+  for (const d of (activeDiscounts || [])) {
+    if (d.amount_off > 0) {
+      result -= d.amount_off
+    }
+  }
+  return Math.max(0, Math.round(result * 100) / 100)
+}
+
+/**
+ * Serialize discount details for JSON columns (same format as existing discount_details_json).
+ */
+function stripeSerializeDiscountDetails_(discountsArr, couponMap, promoMap, currency) {
+  const out = []
+  for (const d of (discountsArr || [])) {
+    const couponId = stripeExtractCouponIdFromDiscount_(d)
+    const couponObj = stripeExtractCouponObjectFromDiscount_(d)
+    const c = (couponId && couponMap[String(couponId)]) || couponObj || null
+
+    let pct = ''
+    let amountOff = ''
+    let dur = ''
+    let durMonths = ''
+    if (c) {
+      if (c.percent_off != null) pct = c.percent_off
+      if (c.amount_off != null) amountOff = stripeMinorUnitsToMajor_(c.amount_off, c.currency || currency)
+      if (c.duration) dur = c.duration
+      if (c.duration_in_months != null) durMonths = c.duration_in_months
+    }
+
+    const startIso = stripeDiscountBoundaryToIso_(d.start)
+    const endIso = stripeDiscountBoundaryToIso_(d.end)
+
+    let promoLabel = ''
+    const promoId = stripeExtractPromotionCodeIdFromDiscount_(d)
+    if (promoId) {
+      const promoObjInline = stripeExtractPromotionCodeObjectFromDiscount_(d)
+      const promoObj = promoObjInline || promoMap[promoId]
+      promoLabel = (promoObj && promoObj.code) ? String(promoObj.code) : String(promoId)
+    }
+
+    out.push({
+      coupon_id: couponId ? String(couponId) : '',
+      percent_off: pct === '' ? '' : Number(pct),
+      amount_off: amountOff === '' ? '' : Number(amountOff),
+      duration: dur || '',
+      duration_in_months: durMonths === '' ? '' : Number(durMonths),
+      start_at: startIso || '',
+      end_at: endIso || '',
+      promotion_code: promoLabel || ''
+    })
+  }
+  return out
+}
+
+/**
+ * Batch-fetch product objects by ID (for product names).
+ */
+function stripeFetchProductsMap_(apiKey, productIds) {
+  const map = {}
+  if (!productIds || !productIds.length) return map
+
+  productIds.forEach(id => {
+    if (!id) return
+    const url = `${STRIPE_RAW_CFG.API_BASE}/products/${encodeURIComponent(id)}`
+    const res = UrlFetchApp.fetch(url, {
+      method: 'get',
+      headers: { Authorization: `Bearer ${apiKey}` },
+      muteHttpExceptions: true
+    })
+
+    const code = res.getResponseCode()
+    if (code >= 300) {
+      Logger.log(`Warning: failed to fetch product ${id}: ${res.getContentText()}`)
+      return
+    }
+
+    map[id] = JSON.parse(res.getContentText())
+    Utilities.sleep(100)
+  })
+
+  Logger.log(`Fetched ${Object.keys(map).length} products`)
+  return map
 }
 
 /* =========================

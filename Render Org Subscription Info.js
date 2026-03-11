@@ -89,7 +89,11 @@ function render_org_subscription_info() {
         'discount_duration',
         'discount_duration_months',
         'discount_start_at',
-        'discount_end_at'
+        'discount_end_at',
+        // ── Discount-adjusted amounts from Stripe sync ──
+        'amount_after_discounts',
+        'amount_after_discounts_monthly',
+        'amount_after_discounts_yearly'
       ]
 
       const rowsOut = orgs.map(org => {
@@ -159,7 +163,11 @@ function render_org_subscription_info() {
           ORGSUBINFO_str_(promo && promo.discount_duration),
           ORGSUBINFO_numOrBlank_(promo && promo.discount_duration_months),
           ORGSUBINFO_toDateOrBlank_(promo && promo.discount_start_at),
-          ORGSUBINFO_toDateOrBlank_(promo && promo.discount_end_at)
+          ORGSUBINFO_toDateOrBlank_(promo && promo.discount_end_at),
+          // ── Discount-adjusted amounts from Stripe sync ──
+          ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts')),
+          ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts_monthly')),
+          ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts_yearly'))
         ]
       })
 
@@ -200,8 +208,8 @@ function ORGSUBINFO_applyFormats_(sheet, rowCount) {
     sheet.getRange(startRow, col, rowCount, 1).setNumberFormat(ORG_SUB_INFO_CFG.INT_FMT)
   })
 
-  // currency columns
-  ;[18, 19, 20, 21, 22, 23].forEach(col => {
+  // currency columns (18-23 = gross amounts, 40-42 = discount-adjusted)
+  ;[18, 19, 20, 21, 22, 23, 40, 41, 42].forEach(col => {
     sheet.getRange(startRow, col, rowCount, 1).setNumberFormat(ORG_SUB_INFO_CFG.CURRENCY_FMT)
   })
 }

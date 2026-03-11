@@ -190,41 +190,38 @@ function render_ring_view() {
         const firstPaymentAtIso = str_(orgSubInfo.first_payment_at)
         const firstPaymentAtDate = isoToDateOrBlank_(firstPaymentAtIso)
         const hasPaymentMethod = toBool_(orgSubInfo.has_payment_method)
-        const ringBucket = ringBucketFromOrgSubscriptionInfo_(statusRaw, firstPaymentAtIso, hasPaymentMethod)
+
+        // ── Single source of truth: discount-adjusted ARR from Stripe sync ──
+        const interval = str_(orgSubInfo.interval).toLowerCase() || str_(r.interval).toLowerCase()
+        const intervalCount = Math.max(1, num_(orgSubInfo.interval_count) || num_(r.interval_count) || 1)
+
+        // Discount-adjusted ARR (computed at item level in Stripe sync)
+        const discountedYearly = num_(orgSubInfo.amount_after_discounts_yearly)
+        const discountedAmount = num_(orgSubInfo.amount_after_discounts)
+        const arr = discountedYearly > 0
+          ? discountedYearly
+          : discountedAmount > 0
+            ? computeMrrArr_(discountedAmount, interval, intervalCount).arr
+            : 0
+
+        // Gross (pre-discount) ARR for 100%-off reclassification
+        const grossYearly = num_(orgSubInfo.amount_yearly)
+        const grossAmount = moneyAmount_(orgSubInfo.amount)
+        const grossArr = grossYearly > 0
+          ? grossYearly
+          : computeMrrArr_(grossAmount, interval, intervalCount).arr
+
+        // ── Bucket logic with 100%-off override ──
+        let ringBucket = ringBucketFromOrgSubscriptionInfo_(statusRaw, firstPaymentAtIso, hasPaymentMethod)
         if (!ringBucket) continue
 
-        const interval = str_(r.interval).toLowerCase()
-        const intervalCount = Math.max(1, num_(r.interval_count) || 1)
-        const asOfNow = new Date()
-
-        // Treat raw amount as whole dollars always (1800 => $1,800.00)
-        const amountRaw = moneyAmount_(r.amount)
-        const discountCtx = ringBuildDiscountContextNow_(r, {
-          amountRaw,
-          interval,
-          intervalCount,
-          asOfDate: asOfNow,
-        })
-        const amount = discountCtx.amount
-        const amountIgnoringPercentDiscounts = ringBuildAmountIgnoringPercentDiscountsNow_(r, {
-          amountRaw,
-          asOfDate: asOfNow
-        })
-
-        const { arr } = computeMrrArr_(amount, interval, intervalCount)
-        const { arr: arrIgnoringPercentDiscounts } = computeMrrArr_(
-          amountIgnoringPercentDiscounts,
-          interval,
-          intervalCount
-        )
-
-        const infoAmount = moneyAmount_(orgSubInfo.amount)
-        const infoAmountYearly = num_(orgSubInfo.amount_yearly)
-        const infoInterval = str_(orgSubInfo.interval).toLowerCase() || interval
-        const infoIntervalCount = Math.max(1, num_(orgSubInfo.interval_count) || intervalCount || 1)
-        const infoArr = (infoAmountYearly > 0)
-          ? infoAmountYearly
-          : computeMrrArr_(infoAmount, infoInterval, infoIntervalCount).arr
+        // Override: if sub would be "paid" but net ARR is $0 (100% discount),
+        // reclassify based on payment method presence
+        let bucketArr = arr
+        if (ringBucket === 'paid' && arr < 0.01) {
+          ringBucket = hasPaymentMethod ? 'intent_to_pay' : 'free_trial'
+          bucketArr = grossArr  // Intent/Free Trial shows full pre-discount ARR
+        }
 
         // Seat count from org_subscription_info when available.
         const seats = Math.max(0, safeInt_(orgSubInfo.quantity_total) || safeInt_(r.quantity_total))
@@ -255,22 +252,22 @@ function render_ring_view() {
 
         if (ringBucket === 'paid') {
           paidSubs += 1
-          // Paid ARR should reflect active Stripe discounts in the moment.
-          paidArr += arr
+          paidArr += bucketArr
           paidSeats += seats
         } else if (ringBucket === 'intent_to_pay') {
           intentToPaySubs += 1
-          intentToPayArr += infoArr
+          intentToPayArr += bucketArr
           intentToPaySeats += seats
         } else {
           freeTrialSubs += 1
-          freeTrialArr += infoArr
+          freeTrialArr += bucketArr
           freeTrialSeats += seats
         }
 
         // Keep free-trial orgs out of the Ring detail table.
         if (ringBucket === 'free_trial') continue
         const displayStatus = ringBucket === 'paid' ? 'Paid' : 'Intent to Pay'
+        const asOfNow = new Date()
 
         const canonByResolvedOrg = resolvedOrgId ? (ringIndexes.canonByOrgId.get(resolvedOrgId) || null) : null
         const signUpIso =
@@ -298,7 +295,7 @@ function render_ring_view() {
             firstPaymentAtDate,
             ringBucket === 'intent_to_pay' ? trialDaysRemaining : '',
             interval || '',
-            infoArr,
+            bucketArr,
             seats
           ]
         })
@@ -814,11 +811,12 @@ function ringBucketFromOrgSubscriptionInfo_(statusRaw, firstPaymentAt, hasPaymen
   // Group 1: Paid
   if (status === 'active' && hasFirstPayment) return 'paid'
 
-  // Group 2: Intent to Pay
-  if (status === 'active' && !hasFirstPayment) return 'intent_to_pay'
+  // Group 2: Intent to Pay (must have payment method)
+  if (status === 'active' && !hasFirstPayment && hasPaymentMethod) return 'intent_to_pay'
   if (status === 'trialing' && hasPaymentMethod) return 'intent_to_pay'
 
-  // Group 3: Free Trial
+  // Group 3: Free Trial (no payment method)
+  if (status === 'active' && !hasFirstPayment && !hasPaymentMethod) return 'free_trial'
   if (status === 'trialing' && !hasPaymentMethod) return 'free_trial'
 
   return ''

@@ -141,7 +141,9 @@ function ui_run_only_clerk() {
 function ui_run_only_ring() {
   return uiRunWrapped_('ui_run_only_ring', () => {
     runSteps_([
-      { name: 'render_ring_view', fn: render_ring_view }
+      { name: 'stripe_pull_subscriptions_to_raw', fn: stripe_pull_subscriptions_to_raw },
+      { name: 'render_org_subscription_info',     fn: render_org_subscription_info },
+      { name: 'render_ring_view',                 fn: render_ring_view }
     ])
   })
 }
