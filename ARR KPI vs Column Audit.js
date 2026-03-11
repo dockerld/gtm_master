@@ -472,7 +472,7 @@ function KPIAUDIT_buildManualChanges_(sheet) {
       KPIAUDIT_str_(r.subscription)
     if (!subId) continue
     const reason = KPIAUDIT_str_(r.exclude_reason).toLowerCase()
-    if (reason !== 'internal') continue
+    if (reason !== 'internal' && reason !== 'partner') continue
     out.set(subId, { excludeInternal: true })
   }
   return out

@@ -278,7 +278,7 @@ function PROMOTRIAL_buildInternalExcludeSubIdSet_(sheetMaybe) {
   const rows = PROMOTRIAL_readSheetObjects_(sheetMaybe, 1)
   rows.forEach(r => {
     const reason = PROMOTRIAL_str_(r.exclude_reason).toLowerCase()
-    if (reason !== 'internal') return
+    if (reason !== 'internal' && reason !== 'partner') return
     const subId =
       PROMOTRIAL_str_(r.subscription_id) ||
       PROMOTRIAL_str_(r.stripe_subscription_id) ||
