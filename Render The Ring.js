@@ -971,7 +971,8 @@ function buildManualStripeChangesBySubId_(sheet) {
     if (!subId) continue
 
     const excludeReason = str_(r.exclude_reason).toLowerCase()
-    if (excludeReason !== 'internal' && excludeReason !== 'partner') continue
+    const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!EXCLUDE_REASONS.has(excludeReason)) continue
     out.set(subId, { excludeInternal: true })
   }
 

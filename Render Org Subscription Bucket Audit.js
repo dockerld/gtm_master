@@ -263,7 +263,8 @@ function ORGSUBA_buildInternalExcludedSubIdSet_(sheet) {
   const rows = ORGSUBA_readSheetObjects_(sheet, 1)
   ;(rows || []).forEach(r => {
     const reason = ORGSUBA_str_(r.exclude_reason).toLowerCase()
-    if (reason !== 'internal' && reason !== 'partner') return
+    const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!EXCLUDE_REASONS.has(reason)) return
     const subId =
       ORGSUBA_str_(r.subscription_id) ||
       ORGSUBA_str_(r.stripe_subscription_id) ||

@@ -219,7 +219,8 @@ function ARRMAP_internalExcludedSubIds_(sheet) {
   const rows = ARRMAP_readSheetObjects_(sheet, 1)
   ;(rows || []).forEach(r => {
     const reason = ARRMAP_str_(r.exclude_reason).toLowerCase()
-    if (reason !== 'internal' && reason !== 'partner') return
+    const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!EXCLUDE_REASONS.has(reason)) return
     const subId =
       ARRMAP_str_(r.subscription_id) ||
       ARRMAP_str_(r.stripe_subscription_id) ||
