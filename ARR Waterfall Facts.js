@@ -156,19 +156,7 @@ function render_arr_waterfall_facts() {
       somByOrgMonth.set(key, rec.eom)
     }
 
-    // Track which orgs have ever appeared in a previous month (for New vs Upgrade)
-    const orgEverSeenInPriorMonth = new Set()
-    const monthsSorted = [...new Set(records.map(r => r.monthKey))].sort()
-    for (const mk of monthsSorted) {
-      const monthRecs = records.filter(r => r.monthKey === mk && r.dayOfMonth === 1)
-      for (const rec of monthRecs) {
-        if (ARR_waterfall_num_(rec.eom) > 0) {
-          // After processing this month, mark as seen for future months
-        }
-      }
-    }
-
-    // Build a set of orgs that had ARR > 0 on any prior month's day-1 snapshot
+    // Build a map of the first month each org had ARR > 0 (for New vs Upgrade)
     const orgFirstSeenMonth = new Map()
     for (const rec of records) {
       if (rec.dayOfMonth !== 1) continue
