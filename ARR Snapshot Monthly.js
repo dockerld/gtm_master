@@ -215,6 +215,7 @@ function one_time_migrate_arr_snapshot_to_new_schema() {
         signUpCohortMonth,
         firstPaymentCohort,
         ARR_snap_migrate_pick_(r, idx, ['current_status']),
+        ARR_snap_migrate_pick_(r, idx, ['ring_bucket']),
         ARR_snap_migrate_pick_(r, idx, ['plan_name']),
         ARR_snap_migrate_pick_(r, idx, ['billing_frequency']),
         ARR_snap_migrate_pick_(r, idx, ['total_arr', 'eom_arr']),
