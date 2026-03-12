@@ -46,8 +46,9 @@ const ARR_RAW_CFG = {
     "first_payment_date",
     "churn_date",
     "sign_up_cohort_month",
-    "first_payment_cohort_month",
+    "paid_cohort_month",
     "current_status",
+    "ring_bucket",
     "plan_name",
     "billing_frequency",
     "total_arr",
@@ -113,8 +114,8 @@ function render_arr_raw_data_view() {
       const firstPaymentIso = ARR_toIsoOrBlank_(info.first_payment_at)
       const subscriptionStartIso = ARR_toIsoOrBlank_(info.subscription_created_at_date)
       const purchaseDate = firstPaymentIso
+      const hasPaymentMethod = ARR_toBool_(info.has_payment_method)
       const signUpCohortMonth = ARR_isoToCohortMonth_(orgCreatedAtIso || "")
-      const firstPaymentCohortMonth = ARR_isoToCohortMonth_(purchaseDate || "")
 
       // Current status from org_subscription_info
       const currentStatus = ARR_str_(info.status)
@@ -128,19 +129,45 @@ function render_arr_raw_data_view() {
         ARR_str_(info.plan_name) ||
         (billingFrequency ? `plan_${billingFrequency}_${intervalCount}` : "")
 
-      // ARR group rule: only active + first_payment_at; discount-aware from org_subscription_info fields.
-      const arrEligible = statusRaw === "active" && !!firstPaymentIso
-      const subId =
-        ARR_str_(info.latest_subscription_id) ||
-        ARR_str_(info.stripe_subscription_id) ||
-        ARR_str_(info.subscription_id) ||
-        ARR_str_(info.id)
-      const stripeRow = subId ? (stripeBySubId.get(subId) || null) : null
-      const arrSourceRow = stripeRow || info
-      const totalArr = arrEligible
-        ? ARR_computeEffectiveArrFromSubscriptionRow_(arrSourceRow, new Date())
-        : 0
+      // ── Single source of truth: discount-adjusted ARR from Stripe sync (same as Ring) ──
+      const discountedYearly = ARR_num_(info.amount_after_discounts_yearly)
+      const discountedAmount = ARR_num_(info.amount_after_discounts)
+      const arr = discountedYearly > 0
+        ? discountedYearly
+        : discountedAmount > 0
+          ? ARR_computeAnnualizedAmount_(discountedAmount, interval, intervalCount)
+          : 0
+
+      // Gross (pre-discount) ARR for 100%-off reclassification
+      const grossYearly = ARR_num_(info.amount_yearly)
+      const grossAmount = ARR_num_(info.amount)
+      const grossArr = grossYearly > 0
+        ? grossYearly
+        : ARR_computeAnnualizedAmount_(grossAmount, interval, intervalCount)
+
+      // ── Bucket logic (same as Ring) ──
+      let ringBucket = ARR_ringBucket_(statusRaw, firstPaymentIso, hasPaymentMethod)
+
+      // Override: if sub would be "paid" but net ARR is $0 (100% discount),
+      // reclassify based on payment method presence
+      let totalArr = arr
+      if (ringBucket === 'paid' && arr < 0.01) {
+        ringBucket = hasPaymentMethod ? 'intent_to_pay' : 'free_trial'
+        totalArr = grossArr  // Intent/Free Trial shows full pre-discount ARR
+      }
+
+      // Only include paid bucket ARR in waterfall; intent_to_pay/free_trial get 0
+      if (ringBucket !== 'paid') totalArr = 0
+
+      // Paid cohort = first month money was actually paid (paid bucket with ARR > 0)
+      const paidCohortMonth = (ringBucket === 'paid' && purchaseDate)
+        ? ARR_isoToCohortMonth_(purchaseDate)
+        : ""
+
       const churnDate = ARR_toIsoOrBlank_(info.churn_date)
+
+      // Skip orgs with no active bucket (canceled, etc.)
+      if (!ringBucket) continue
 
       // Map to your output headers by name (so column order can evolve safely)
       const rowObj = {
@@ -150,8 +177,9 @@ function render_arr_raw_data_view() {
         first_payment_date: purchaseDate || "",
         churn_date: churnDate,
         sign_up_cohort_month: signUpCohortMonth,
-        first_payment_cohort_month: firstPaymentCohortMonth,
+        paid_cohort_month: paidCohortMonth,
         current_status: currentStatus,
+        ring_bucket: ringBucket,
         plan_name: planName,
         billing_frequency: billingFrequency,
         total_arr: totalArr,
@@ -673,7 +701,8 @@ function ARR_buildInternalExcludeSubIdSet_(sheet) {
   const rows = ARR_readSheetObjects_(sheet, 1)
   ;(rows || []).forEach(r => {
     const reason = ARR_str_(r.exclude_reason).toLowerCase()
-    if (reason !== "internal") return
+    const ARR_EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!ARR_EXCLUDE_REASONS.has(reason)) return
     const subId =
       ARR_str_(r.subscription_id) ||
       ARR_str_(r.stripe_subscription_id) ||
@@ -776,7 +805,7 @@ function ARR_clearDataRegion_(sheet, startRow, numCols) {
 
 function ARR_applyArrRawFormats_(sheet, header, numRows) {
   if (!numRows) return
-  const cohortHeaders = ["sign_up_cohort_month", "first_payment_cohort_month"]
+  const cohortHeaders = ["sign_up_cohort_month", "paid_cohort_month"]
   cohortHeaders.forEach(h => {
     const idx = header.findIndex(k => String(k || "").trim().toLowerCase() === h)
     if (idx < 0) return
@@ -933,4 +962,24 @@ function ARR_firstNonEmpty_() {
     if (v) return v
   }
   return ""
+}
+
+function ARR_toBool_(v) {
+  if (v === true || v === 1) return true
+  const s = ARR_str_(v).toLowerCase()
+  return s === 'true' || s === 'yes' || s === '1'
+}
+
+function ARR_ringBucket_(statusRaw, firstPaymentAt, hasPaymentMethod) {
+  const status = ARR_str_(statusRaw).toLowerCase()
+  const hasFirstPayment = !!ARR_str_(firstPaymentAt)
+  const hasPM = !!hasPaymentMethod
+
+  if (status === 'active' && hasFirstPayment) return 'paid'
+  if (status === 'active' && !hasFirstPayment && hasPM) return 'intent_to_pay'
+  if (status === 'trialing' && hasPM) return 'intent_to_pay'
+  if (status === 'active' && !hasFirstPayment && !hasPM) return 'free_trial'
+  if (status === 'trialing' && !hasPM) return 'free_trial'
+
+  return ''
 }
