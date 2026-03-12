@@ -45,8 +45,9 @@ const ARR_SNAPSHOT_MIGRATE_CFG = {
     'first_payment_date',
     'churn_date',
     'sign_up_cohort_month',
-    'first_payment_cohort_month',
+    'paid_cohort_month',
     'current_status',
+    'ring_bucket',
     'plan_name',
     'billing_frequency',
     'total_arr',
@@ -373,7 +374,7 @@ function ARR_snap_applyCohortFormat_(sheet) {
 
   applyFmt(ARR_SNAP_CFG.SNAPSHOT_DATE_HEADER, ARR_SNAP_CFG.SNAPSHOT_DATE_FMT)
   applyFmt(ARR_SNAP_CFG.COHORT_HEADER, ARR_SNAP_CFG.COHORT_FMT)
-  applyFmt('first_payment_cohort_month', ARR_SNAP_CFG.COHORT_FMT)
+  applyFmt('paid_cohort_month', ARR_SNAP_CFG.COHORT_FMT)
   applyFmt(ARR_SNAP_CFG.ARR_HEADER, '0')
 }
 
@@ -720,4 +721,50 @@ function ARR_monthly_pad2_(n) {
 function ARR_monthly_num_(v) {
   const n = Number(v)
   return isFinite(n) ? n : 0
+}
+
+/**
+ * check_arr_snapshot_day1_alert()
+ *
+ * Run this on the 2nd of each month (via time-based trigger).
+ * If the arr_snapshot sheet has no day-1 snapshot for the current month,
+ * sends an alert email so you know the snapshot was missed.
+ */
+function check_arr_snapshot_day1_alert() {
+  const ss = SpreadsheetApp.getActive()
+  const snap = ss.getSheetByName(ARR_SNAP_CFG.SNAP_SHEET)
+  if (!snap) return
+
+  const now = new Date()
+  const expectedKey = String(now.getUTCFullYear()) + '-' +
+    ARR_monthly_pad2_(now.getUTCMonth() + 1) + '-01'
+
+  const lastRow = snap.getLastRow()
+  if (lastRow < 2) {
+    ARR_sendSnapshotAlert_(expectedKey)
+    return
+  }
+
+  const header = snap.getRange(1, 1, 1, snap.getLastColumn()).getValues()[0]
+    .map(h => String(h || '').trim())
+  const snapIdx = header.findIndex(h => h.toLowerCase() === 'snapshot_date')
+  if (snapIdx < 0) return
+
+  const vals = snap.getRange(2, snapIdx + 1, lastRow - 1, 1).getValues()
+  const found = vals.some(r => {
+    const key = ARR_snap_normSnapshotKey_(r[0])
+    return key === expectedKey
+  })
+
+  if (!found) ARR_sendSnapshotAlert_(expectedKey)
+}
+
+function ARR_sendSnapshotAlert_(expectedKey) {
+  const recipient = 'docker@pingassistant.com'
+  GmailApp.sendEmail(
+    recipient,
+    'ALERT: ARR Snapshot Missing for ' + expectedKey,
+    'The arr_snapshot sheet does not have a day-1 snapshot for ' + expectedKey + '.\n\n' +
+    'Please run the ARR snapshot manually to avoid gaps in the waterfall data.'
+  )
 }

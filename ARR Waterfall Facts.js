@@ -3,12 +3,13 @@
  *
  * Builds the "arr_waterfall_facts" table from arr_snapshot.
  * Output columns:
- *   snapshot_date | cohort_month_trial | cohort_month_subscription | cohort_month_paid |
- *   org_id | org_name | subscription_start_date | trial_start_date | purchase_date |
+ *   snapshot_date | org_id | org_name | org_creation_date | first_payment_date |
+ *   churn_date | sign_up_cohort_month | paid_cohort_month | current_status |
+ *   ring_bucket | plan_name | billing_frequency | subscription_start_date |
  *   metric | amount
  *
  * Metrics (rows):
- *   SOM, Upgrade, Downgrade, Churn, EOM
+ *   SOM, New, Upgrade, Downgrade, Churn, EOM
  **************************************************************/
 
 const ARR_WATERFALL_CFG = {
@@ -25,8 +26,9 @@ const ARR_WATERFALL_CFG = {
   FIRST_PAYMENT_HEADER: 'first_payment_date',
   CHURN_DATE_HEADER: 'churn_date',
   COHORT_HEADER: 'sign_up_cohort_month',
-  FIRST_PAYMENT_COHORT_HEADER: 'first_payment_cohort_month',
+  PAID_COHORT_HEADER: 'paid_cohort_month',
   STATUS_HEADER: 'current_status',
+  RING_BUCKET_HEADER: 'ring_bucket',
   PLAN_HEADER: 'plan_name',
   BILLING_FREQ_HEADER: 'billing_frequency',
   SUB_START_HEADER: 'subscription_start_date',
@@ -71,8 +73,9 @@ function render_arr_waterfall_facts() {
       h.toLowerCase() === 'cohort_month' ||
       h.toLowerCase() === 'trial_cohort_month'
     )
-    const firstPaymentCohortIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.FIRST_PAYMENT_COHORT_HEADER.toLowerCase())
+    const paidCohortIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.PAID_COHORT_HEADER.toLowerCase())
     const statusIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.STATUS_HEADER.toLowerCase())
+    const ringBucketIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.RING_BUCKET_HEADER.toLowerCase())
     const planIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.PLAN_HEADER.toLowerCase())
     const billingFreqIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.BILLING_FREQ_HEADER.toLowerCase())
     const subStartIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.SUB_START_HEADER.toLowerCase())
@@ -102,10 +105,11 @@ function render_arr_waterfall_facts() {
       const firstPayment = ARR_waterfall_str_(r[firstPaymentIdx])
       const churnDate = (churnDateIdx >= 0) ? ARR_waterfall_str_(r[churnDateIdx]) : ''
       const cohortMonth = ARR_waterfall_formatCohort_(r[cohortIdx], tz)
-      const firstPaymentCohort = (firstPaymentCohortIdx >= 0)
-        ? ARR_waterfall_formatCohort_(r[firstPaymentCohortIdx], tz)
+      const paidCohort = (paidCohortIdx >= 0)
+        ? ARR_waterfall_formatCohort_(r[paidCohortIdx], tz)
         : ''
       const currentStatus = (statusIdx >= 0) ? ARR_waterfall_str_(r[statusIdx]) : ''
+      const ringBucket = (ringBucketIdx >= 0) ? ARR_waterfall_str_(r[ringBucketIdx]) : ''
       const planName = (planIdx >= 0) ? ARR_waterfall_str_(r[planIdx]) : ''
       const billingFreq = (billingFreqIdx >= 0) ? ARR_waterfall_str_(r[billingFreqIdx]) : ''
       const subscriptionStart = ARR_waterfall_str_(r[subStartIdx])
@@ -129,8 +133,9 @@ function render_arr_waterfall_facts() {
         firstPayment,
         churnDate,
         cohortMonth,
-        firstPaymentCohort,
+        paidCohort,
         currentStatus,
+        ringBucket,
         planName,
         billingFreq,
         subscriptionStart,
@@ -151,51 +156,71 @@ function render_arr_waterfall_facts() {
       somByOrgMonth.set(key, rec.eom)
     }
 
+    // Track which orgs have ever appeared in a previous month (for New vs Upgrade)
+    const orgEverSeenInPriorMonth = new Set()
+    const monthsSorted = [...new Set(records.map(r => r.monthKey))].sort()
+    for (const mk of monthsSorted) {
+      const monthRecs = records.filter(r => r.monthKey === mk && r.dayOfMonth === 1)
+      for (const rec of monthRecs) {
+        if (ARR_waterfall_num_(rec.eom) > 0) {
+          // After processing this month, mark as seen for future months
+        }
+      }
+    }
+
+    // Build a set of orgs that had ARR > 0 on any prior month's day-1 snapshot
+    const orgFirstSeenMonth = new Map()
+    for (const rec of records) {
+      if (rec.dayOfMonth !== 1) continue
+      if (ARR_waterfall_num_(rec.eom) <= 0) continue
+      const existing = orgFirstSeenMonth.get(rec.orgKey)
+      if (!existing || rec.monthKey < existing) {
+        orgFirstSeenMonth.set(rec.orgKey, rec.monthKey)
+      }
+    }
+
     const out = []
     for (const rec of records) {
       const somKey = rec.orgKey + '|' + rec.monthKey
       const som = ARR_waterfall_num_(somByOrgMonth.get(somKey) || 0)
       const eom = ARR_waterfall_num_(rec.eom)
+      let newCustomer = 0
       let upgrade = 0
       let downgrade = 0
       let churn = 0
+
       if (som > 0 && eom === 0) {
         churn = som
+      } else if (som === 0 && eom > 0) {
+        // First time this org appears with ARR — it's a new customer
+        const firstMonth = orgFirstSeenMonth.get(rec.orgKey) || rec.monthKey
+        if (rec.monthKey === firstMonth) {
+          newCustomer = eom
+        } else {
+          // Was previously seen but SOM is 0 this month — reactivation, treat as upgrade
+          upgrade = eom
+        }
       } else if (eom > som) {
         upgrade = eom - som
       } else if (eom < som && eom > 0) {
         downgrade = som - eom
       }
 
-      out.push([
+      const base = [
         rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'SOM', som
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'Upgrade', upgrade
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'Downgrade', downgrade
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'Churn', churn
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'EOM', eom
-      ])
+        rec.cohortMonth, rec.paidCohort, rec.currentStatus, rec.ringBucket, rec.planName, rec.billingFreq,
+        rec.subscriptionStart
+      ]
+      out.push([...base, 'SOM', som])
+      out.push([...base, 'New', newCustomer])
+      out.push([...base, 'Upgrade', upgrade])
+      out.push([...base, 'Downgrade', downgrade])
+      out.push([...base, 'Churn', churn])
+      out.push([...base, 'EOM', eom])
     }
 
     outSheet.clearContents()
-    outSheet.getRange(1, 1, 1, 14).setValues([[
+    const outHeaders = [
       'snapshot_date',
       'org_id',
       'org_name',
@@ -203,21 +228,23 @@ function render_arr_waterfall_facts() {
       'first_payment_date',
       'churn_date',
       'sign_up_cohort_month',
-      'first_payment_cohort_month',
+      'paid_cohort_month',
       'current_status',
+      'ring_bucket',
       'plan_name',
       'billing_frequency',
       'subscription_start_date',
       'metric',
       'amount'
-    ]])
+    ]
+    outSheet.getRange(1, 1, 1, outHeaders.length).setValues([outHeaders])
 
     if (out.length) {
       batchSetValuesCompat_(outSheet, 2, 1, out, ARR_WATERFALL_CFG.WRITE_CHUNK)
     }
 
     outSheet.setFrozenRows(1)
-    outSheet.autoResizeColumns(1, 14)
+    outSheet.autoResizeColumns(1, outHeaders.length)
 
     const seconds = (new Date() - t0) / 1000
     if (typeof writeSyncLog === 'function') {

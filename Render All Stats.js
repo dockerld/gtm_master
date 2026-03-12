@@ -945,7 +945,7 @@ function ALLSTATS_buildWaterfallTables_(rows) {
 
     parsed.push({
       date_key: dateKey,
-      cohort: ALLSTATS_str_(r.cohort_month_trial) || '(blank)',
+      cohort: ALLSTATS_str_(r.sign_up_cohort_month) || ALLSTATS_str_(r.paid_cohort_month) || '(blank)',
       org_id: ALLSTATS_str_(r.org_id),
       org_name: ALLSTATS_str_(r.org_name),
       metric,
@@ -987,6 +987,7 @@ function ALLSTATS_buildWaterfallTables_(rows) {
 function ALLSTATS_emptyWaterfallBucket_(base) {
   return Object.assign({}, base || {}, {
     som: 0,
+    new_customer: 0,
     upgrade: 0,
     downgrade: 0,
     churn: 0,
@@ -998,6 +999,7 @@ function ALLSTATS_addMetricToWaterfallBucket_(bucket, metric, amount) {
   if (!bucket) return
   const m = String(metric || '').toLowerCase()
   if (m === 'som') bucket.som += amount
+  else if (m === 'new') bucket.new_customer += amount
   else if (m === 'upgrade') bucket.upgrade += amount
   else if (m === 'downgrade') bucket.downgrade += amount
   else if (m === 'churn') bucket.churn += amount
@@ -1174,33 +1176,35 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
 
   row = ALLSTATS_writeSection_(sheet, row, 'Waterfall (Latest Snapshot by Cohort)')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Snapshot', 'Cohort', 'SOM', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
+    ['Snapshot', 'Cohort', 'SOM', 'New', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
     (data.waterfall.byCohort || []).map(r => [
       data.waterfall.latest_snapshot || '',
       r.cohort,
       r.som,
+      r.new_customer,
       r.upgrade,
       r.downgrade,
       r.churn,
       r.eom
     ]),
-    { currencyCols: [3, 4, 5, 6, 7] }
+    { currencyCols: [3, 4, 5, 6, 7, 8] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, 'Waterfall (Latest Snapshot by Org)')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Snapshot', 'Org ID', 'Org Name', 'SOM', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
+    ['Snapshot', 'Org ID', 'Org Name', 'SOM', 'New', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
     (data.waterfall.byOrg || []).map(r => [
       data.waterfall.latest_snapshot || '',
       r.org_id,
       r.org_name,
       r.som,
+      r.new_customer,
       r.upgrade,
       r.downgrade,
       r.churn,
       r.eom
     ]),
-    { currencyCols: [4, 5, 6, 7, 8] }
+    { currencyCols: [4, 5, 6, 7, 8, 9] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, 'Trialing (No Payment Method)')
