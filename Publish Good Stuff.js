@@ -102,10 +102,10 @@ function GOOD_getGoalAndQuota_(sourceSs) {
   const tz = Session.getScriptTimeZone()
   const thisMonthKey = Utilities.formatDate(new Date(), tz, 'MMM-yyyy')
 
-  // Goal: headers row 12, values row 13
-  const goalArr = GOOD_findMonthValue_(sh, 12, 13, lastCol, thisMonthKey)
-  // Quota: headers row 6, values row 7
-  const quotaArr = GOOD_findMonthValue_(sh, 6, 7, lastCol, thisMonthKey)
+  // Quota: headers row 12, values row 13
+  const quotaArr = GOOD_findMonthValue_(sh, 12, 13, lastCol, thisMonthKey)
+  // Goal: headers row 6, values row 7
+  const goalArr = GOOD_findMonthValue_(sh, 6, 7, lastCol, thisMonthKey)
 
   return { goalArr, quotaArr }
 }
