@@ -20,7 +20,6 @@ const GOOD_STUFF_CFG = {
     PAID_WITH_FIRST_COL: 2, // B2:D2 in The Ring
     COMBINED_COL: 6         // F2:H2 in The Ring
   },
-  ANNUAL_GOAL_ARR: 1000000,
   TABLE_START_ROW: 13
 }
 
@@ -34,7 +33,7 @@ function publish_the_good_stuff() {
     const out = GOOD_getOrCreateSheet_(targetSs, GOOD_STUFF_CFG.TARGET.SHEET_NAME)
 
     const metrics = GOOD_readRingMetrics_(ring)
-    const goals = GOOD_readGoals_(sourceSs, metrics.combined.arr)
+    const goals = GOOD_readGoals_(sourceSs, metrics.paidWithFirstPayment.arr)
     const table = GOOD_readRingTable_(ring)
 
     GOOD_resetAndStyleCanvas_(out)
@@ -69,62 +68,65 @@ function GOOD_readRingMetrics_(ringSheet) {
 }
 
 function GOOD_readGoals_(sourceSs, currentArr) {
-  const monthlyGoal = GOOD_getMonthlyArrGoal_(sourceSs)
-  const annualGoal = GOOD_STUFF_CFG.ANNUAL_GOAL_ARR
+  const goalsData = GOOD_getGoalAndQuota_(sourceSs)
+  const monthlyQuota = goalsData.quotaArr
+  const monthlyGoal = goalsData.goalArr
 
-  const monthlyPct = monthlyGoal > 0 ? (currentArr / monthlyGoal) : 0
-  const annualPct = annualGoal > 0 ? (currentArr / annualGoal) : 0
+  const quotaPct = monthlyQuota > 0 ? (currentArr / monthlyQuota) : 0
+  const goalPct = monthlyGoal > 0 ? (currentArr / monthlyGoal) : 0
 
   return {
     currentArr: GOOD_num_(currentArr),
+    monthlyQuota: GOOD_num_(monthlyQuota),
     monthlyGoal: GOOD_num_(monthlyGoal),
-    annualGoal: GOOD_num_(annualGoal),
-    monthlyPct: GOOD_clamp01_(monthlyPct),
-    annualPct: GOOD_clamp01_(annualPct)
+    quotaPct: GOOD_clamp01_(quotaPct),
+    goalPct: GOOD_clamp01_(goalPct)
   }
 }
 
-function GOOD_getMonthlyArrGoal_(sourceSs) {
-  if (typeof getMonthlyArrGoalFromGoalsSheet_ === 'function') {
+function GOOD_getGoalAndQuota_(sourceSs) {
+  // Prefer the shared helper from Email notifications.js if available
+  if (typeof getMonthlyGoalAndQuotaFromGoalsSheet_ === 'function') {
     try {
-      const n = Number(getMonthlyArrGoalFromGoalsSheet_())
-      if (isFinite(n) && n > 0) return n
+      const r = getMonthlyGoalAndQuotaFromGoalsSheet_()
+      if (r && (r.goalArr > 0 || r.quotaArr > 0)) return r
     } catch (e) {}
   }
 
   const sh = sourceSs.getSheetByName('Goals')
-  if (!sh) return 0
+  if (!sh) return { goalArr: 0, quotaArr: 0 }
 
   const lastCol = sh.getLastColumn()
-  if (lastCol < 1) return 0
-
-  const headers = sh.getRange(1, 1, 1, lastCol).getDisplayValues()[0]
-  const arrRow = sh.getRange(2, 1, 1, lastCol).getValues()[0]
+  if (lastCol < 2) return { goalArr: 0, quotaArr: 0 }
 
   const tz = Session.getScriptTimeZone()
   const thisMonthKey = Utilities.formatDate(new Date(), tz, 'MMM-yyyy')
 
-  let idx = -1
+  // Goal: headers row 12, values row 13
+  const goalArr = GOOD_findMonthValue_(sh, 12, 13, lastCol, thisMonthKey)
+  // Quota: headers row 6, values row 7
+  const quotaArr = GOOD_findMonthValue_(sh, 6, 7, lastCol, thisMonthKey)
+
+  return { goalArr, quotaArr }
+}
+
+function GOOD_findMonthValue_(sh, headerRow, valueRow, lastCol, monthKey) {
+  const headers = sh.getRange(headerRow, 1, 1, lastCol).getDisplayValues()[0]
+  const values = sh.getRange(valueRow, 1, 1, lastCol).getValues()[0]
+
   for (let i = 0; i < headers.length; i++) {
-    if (String(headers[i] || '').trim() === thisMonthKey) {
-      idx = i
-      break
+    if (String(headers[i] || '').trim() === monthKey) {
+      const n = Number(values[i])
+      return isFinite(n) ? n : 0
     }
   }
 
-  if (idx === -1) {
-    for (let c = arrRow.length - 1; c >= 0; c--) {
-      const v = Number(arrRow[c])
-      if (isFinite(v) && v > 0) {
-        idx = c
-        break
-      }
-    }
+  // Fallback: latest positive value
+  for (let c = values.length - 1; c >= 0; c--) {
+    const n = Number(values[c])
+    if (isFinite(n) && n > 0) return n
   }
-
-  if (idx < 0) return 0
-  const n = Number(arrRow[idx])
-  return isFinite(n) ? n : 0
+  return 0
 }
 
 function GOOD_readRingTable_(ringSheet) {
@@ -190,8 +192,8 @@ function GOOD_writeHeader_(sheet) {
 }
 
 function GOOD_writeGoalStrip_(sheet, goals) {
-  const labels = ['Current ARR', 'Monthly Goal', 'Annual Goal']
-  const values = [goals.currentArr, goals.monthlyGoal, goals.annualGoal]
+  const labels = ['Current ARR', 'Monthly Quota', 'Monthly Goal']
+  const values = [goals.currentArr, goals.monthlyQuota, goals.monthlyGoal]
   const starts = [1, 5, 9]
 
   for (let i = 0; i < starts.length; i++) {
@@ -221,7 +223,7 @@ function GOOD_writeGoalStrip_(sheet, goals) {
   progress.merge()
   progress
     .setValue(
-      `Progress • Monthly: ${GOOD_pctText_(goals.monthlyPct)}    |    Annual: ${GOOD_pctText_(goals.annualPct)}`
+      `Progress • Quota: ${GOOD_pctText_(goals.quotaPct)}    |    Goal: ${GOOD_pctText_(goals.goalPct)}`
     )
     .setHorizontalAlignment('center')
     .setFontWeight('bold')
@@ -338,6 +340,8 @@ function GOOD_writeTable_(sheet, startRow, headers, rows) {
     const cDisc = col('discount %')
     const cSeats = col('seats')
     const cFirstPay = col('first payment at')
+    const cSignUp = col('sign up date')
+    const cTrialDays = col('trial days remaining')
 
     if (cAmount > 0) sheet.getRange(startRow + 1, cAmount, rows.length, 1).setNumberFormat('$#,##0.00')
     if (cMrr > 0) sheet.getRange(startRow + 1, cMrr, rows.length, 1).setNumberFormat('$#,##0.00')
@@ -345,6 +349,8 @@ function GOOD_writeTable_(sheet, startRow, headers, rows) {
     if (cDisc > 0) sheet.getRange(startRow + 1, cDisc, rows.length, 1).setNumberFormat('0.##%')
     if (cSeats > 0) sheet.getRange(startRow + 1, cSeats, rows.length, 1).setNumberFormat('0')
     if (cFirstPay > 0) sheet.getRange(startRow + 1, cFirstPay, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm:ss')
+    if (cSignUp > 0) sheet.getRange(startRow + 1, cSignUp, rows.length, 1).setNumberFormat('MM-dd-yy')
+    if (cTrialDays > 0) sheet.getRange(startRow + 1, cTrialDays, rows.length, 1).setNumberFormat('0')
 
     try { sheet.getRange(startRow, 1, rows.length + 1, headers.length).applyRowBanding() } catch (e) {}
   }
