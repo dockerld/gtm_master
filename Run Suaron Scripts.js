@@ -42,6 +42,7 @@ function run_daily_pipeline() {
 
       { name: 'build_canon_orgs',                fn: build_canon_orgs },
       { name: 'build_canon_users',               fn: build_canon_users },
+      { name: 'render_sauron_view',              fn: render_sauron_view },
       { name: 'render_arr_raw_data_view',        fn: render_arr_raw_data_view },
       { name: 'write_arr_snapshot',              fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts',      fn: render_arr_waterfall_facts },
