@@ -175,12 +175,10 @@ function GOOD_writeHeader_(sheet) {
     .setBackground('#FFFFFF')
     .setFontColor('#111111')
 
-  const tz = Session.getScriptTimeZone()
-  const stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss')
   const subtitle = sheet.getRange(2, 1, 1, 12)
   subtitle.merge()
   subtitle
-    .setValue(`Live snapshot from The Ring • Updated ${stamp}`)
+    .setValue('Path to $1,000,000')
     .setFontSize(11)
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
