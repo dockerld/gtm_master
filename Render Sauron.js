@@ -129,8 +129,8 @@ const SAURON_CFG = {
  * Set TARGET_DOMAIN to the domain you’re debugging.
  */
 const SAURON_DEBUG = {
-  ENABLED: true,
-  TARGET_DOMAIN: 'firstpurposetax.com', // <-- change this when debugging other orgs
+  ENABLED: false,
+  TARGET_DOMAIN: '',
   SHEET_NAME: 'Sauron Debug',
   MAX_ROWS: 500
 }

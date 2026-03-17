@@ -5,10 +5,9 @@
  *  - Run daily pipeline
  *  - Run only PostHog
  *  - Run only Stripe
- *  - Run only Clerk
  *  - Run The Ring only
  *  - Rebuild canon tables
- *  - Push UpSale targets to Notion  ✅ NEW
+ *  - Sync CRM to Notion
  *
  * Notes:
  * - Each action uses LockService via lockWrap()
@@ -33,8 +32,7 @@
  *   render_arr_waterfall_facts()
  *   render_onboarding_stats()
  *   render_org_conversion_stats()
- *   notion_push_upsale_targets_from_org_info()   ✅ NEW
- *   write_daily_snapshot()
+ *   sync_crm_to_notion (link + sync all)
  *   writeSyncLog(step, status, rows_in, rows_out, seconds, error)
  *   lockWrap(fn)  (your shared utility)
  **************************************************************/
@@ -49,13 +47,14 @@ function onOpen() {
     .addItem('Run The Ring only', 'ui_run_only_ring')
     .addItem('Render All the Stats', 'ui_render_all_stats')
     .addItem('Publish The Good Stuff', 'ui_publish_the_good_stuff')
-    .addItem('Send Ring Weekly Test (Docker)', 'ui_send_ring_weekly_test_docker')
     .addSeparator()
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addSeparator()
-    .addItem('Push UpSale targets to Notion', 'ui_push_upsale_targets_to_notion') // ✅ NEW
+    .addItem('Sync CRM to Notion', 'ui_sync_crm_to_notion')
+    .addItem('CRM Dedup Cleanup', 'ui_crm_dedup_cleanup')
+    .addItem('CRM Full Rebuild (wipe + create)', 'ui_crm_full_rebuild')
     .addToUi()
 }
 
@@ -65,20 +64,6 @@ function onOpen() {
 
 function ui_run_daily_pipeline() {
   return uiRunWrapped_('ui_run_daily_pipeline', () => {
-    run_daily_pipeline()
-  })
-}
-
-function ui_confirmed_run_daily_pipeline() {
-  const ui = SpreadsheetApp.getUi()
-  const result = ui.alert(
-    'Confirm Resync',
-    'Are you sure you want to resync? This will take 5-10 min to resync everything.',
-    ui.ButtonSet.YES_NO
-  )
-  if (result !== ui.Button.YES) return
-
-  return uiRunWrapped_('ui_confirmed_run_daily_pipeline', () => {
     run_daily_pipeline()
   })
 }
@@ -94,15 +79,6 @@ function ui_run_only_posthog() {
       { name: 'build_canon_users', fn: build_canon_users },
       { name: 'render_sauron_view', fn: render_sauron_view },
       { name: 'render_ring_view', fn: render_ring_view }
-      // { name: 'write_daily_snapshot', fn: write_daily_snapshot }
-    ])
-  })
-}
-
-function ui_resync_promo_redemptions() {
-  return uiRunWrapped_('ui_resync_promo_redemptions', () => {
-    runSteps_([
-      { name: 'posthog_pull_promo_redemptions_to_raw', fn: posthog_pull_promo_redemptions_to_raw }
     ])
   })
 }
@@ -112,21 +88,6 @@ function ui_run_only_stripe() {
     runSteps_([
       { name: 'stripe_pull_subscriptions_to_raw', fn: stripe_pull_subscriptions_to_raw },
       { name: 'build_canon_orgs', fn: build_canon_orgs },
-      { name: 'render_sauron_view', fn: render_sauron_view },
-      { name: 'render_ring_view', fn: render_ring_view }
-    ])
-  })
-}
-
-function ui_run_only_clerk() {
-  return uiRunWrapped_('ui_run_only_clerk', () => {
-    runSteps_([
-      { name: 'clerk_pull_users_to_raw', fn: clerk_pull_users_to_raw },
-      { name: 'clerk_pull_orgs_to_raw', fn: clerk_pull_orgs_to_raw },
-      { name: 'clerk_pull_memberships_to_raw', fn: clerk_pull_memberships_to_raw },
-      { name: 'syncClerkUsers (login events)', fn: syncClerkUsers },
-      { name: 'build_canon_orgs', fn: build_canon_orgs },
-      { name: 'build_canon_users', fn: build_canon_users },
       { name: 'render_sauron_view', fn: render_sauron_view },
       { name: 'render_ring_view', fn: render_ring_view }
     ])
@@ -151,34 +112,10 @@ function ui_render_all_stats() {
   })
 }
 
-function ui_render_promo_trial_page() {
-  return uiRunWrapped_('ui_render_promo_trial_page', () => {
-    runSteps_([
-      { name: 'render_promo_trial_page', fn: render_promo_trial_page }
-    ])
-  })
-}
-
-function ui_render_org_subscription_info() {
-  return uiRunWrapped_('ui_render_org_subscription_info', () => {
-    runSteps_([
-      { name: 'render_org_subscription_info', fn: render_org_subscription_info }
-    ])
-  })
-}
-
 function ui_publish_the_good_stuff() {
   return uiRunWrapped_('ui_publish_the_good_stuff', () => {
     runSteps_([
       { name: 'publish_the_good_stuff', fn: publish_the_good_stuff }
-    ])
-  })
-}
-
-function ui_send_ring_weekly_test_docker() {
-  return uiRunWrapped_('ui_send_ring_weekly_test_docker', () => {
-    runSteps_([
-      { name: 'send_ring_weekly_email_test_docker', fn: send_ring_weekly_email_test_docker }
     ])
   })
 }
@@ -198,8 +135,6 @@ function ui_run_arr_refresh() {
   return uiRunWrapped_('ui_run_arr_refresh', () => {
     runSteps_([
       { name: 'render_arr_raw_data_view', fn: render_arr_raw_data_view },
-      { name: 'one_time_migrate_arr_snapshot_to_new_schema', fn: one_time_migrate_arr_snapshot_to_new_schema },
-      { name: 'one_time_add_first_payment_cohort_to_arr_snapshot', fn: one_time_add_first_payment_cohort_to_arr_snapshot },
       { name: 'write_arr_snapshot', fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts', fn: render_arr_waterfall_facts }
     ])
@@ -214,45 +149,33 @@ function ui_run_arr_mapping_audit() {
   })
 }
 
-function ui_audit_all_stats_vs_ring() {
-  return uiRunWrapped_('ui_audit_all_stats_vs_ring', () => {
+function ui_sync_crm_to_notion() {
+  return uiRunWrapped_('ui_sync_crm_to_notion', () => {
     runSteps_([
-      { name: 'render_all_stats_vs_ring_audit', fn: render_all_stats_vs_ring_audit }
+      { name: 'link_unlinked_orgs', fn: link_unlinked_orgs },
+      { name: 'link_unlinked_contacts', fn: link_unlinked_contacts },
+      { name: 'sync_orgs_to_notion', fn: sync_orgs_to_notion },
+      { name: 'sync_users_to_notion', fn: sync_users_to_notion }
     ])
   })
 }
 
-function ui_run_conversion_onboarding_stats() {
-  return uiRunWrapped_('ui_run_conversion_onboarding_stats', () => {
+function ui_crm_dedup_cleanup() {
+  return uiRunWrapped_('ui_crm_dedup_cleanup', () => {
     runSteps_([
-      { name: 'render_conversion_onboarding_stats', fn: render_conversion_onboarding_stats }
+      { name: 'crm_dedup_cleanup', fn: crm_dedup_cleanup }
     ])
   })
 }
 
-function ui_run_onboarding_stats() {
-  return ui_run_conversion_onboarding_stats()
-}
-
-function ui_run_conversion_stats() {
-  return ui_run_conversion_onboarding_stats()
-}
-
-function ui_run_conversion_audit() {
-  return uiRunWrapped_('ui_run_conversion_audit', () => {
+function ui_crm_full_rebuild() {
+  return uiRunWrapped_('ui_crm_full_rebuild', () => {
     runSteps_([
-      { name: 'render_org_conversion_audit', fn: render_org_conversion_audit }
-    ])
-  })
-}
-
-/**
- * ✅ NEW: Manual button to push UpSale targets from org_info -> Notion
- */
-function ui_push_upsale_targets_to_notion() {
-  return uiRunWrapped_('ui_push_upsale_targets_to_notion', () => {
-    runSteps_([
-      { name: 'notion_push_upsale_targets_from_org_info', fn: notion_push_upsale_targets_from_org_info }
+      { name: 'crm_archive_all', fn: crm_archive_all },
+      { name: 'sync_orgs_to_notion', fn: sync_orgs_to_notion },
+      { name: 'link_unlinked_contacts', fn: link_unlinked_contacts },
+      { name: 'link_unlinked_orgs', fn: link_unlinked_orgs },
+      { name: 'sync_users_to_notion', fn: sync_users_to_notion }
     ])
   })
 }

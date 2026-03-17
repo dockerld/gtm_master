@@ -231,28 +231,3 @@ function normalizeDbId_(rawId) {
   return rawId.replace(/^(.{8})(.{4})(.{4})(.{4})(.{12})$/, '$1-$2-$3-$4-$5');
 }
 
-/**
- * Manual test: one-off page with Docker as Person
- */
-function testSendToNotionDocker() {
-  const title = '✅ Test task (Docker)';
-  const page = createNotionPageWithPerson_({ title, personName: 'Docker', email: '' });
-  Logger.log('Created test page: ' + (page?.url || '(no url)'));
-}
-
-function getNotionUsers() {
-  const props = PropertiesService.getScriptProperties();
-  const token = props.getProperty('NOTION_TOKEN');
-  if (!token) throw new Error('Missing NOTION_TOKEN script property');
-
-  const res = UrlFetchApp.fetch('https://api.notion.com/v1/users', {
-    method: 'get',
-    headers: {
-      'Authorization': `Bearer ${token}`,
-      'Notion-Version': '2022-06-28'
-    }
-  });
-
-  const users = JSON.parse(res.getContentText());
-  Logger.log(JSON.stringify(users, null, 2));
-}

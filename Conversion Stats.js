@@ -18,7 +18,6 @@
 
 const CONV_CFG = {
   SHEET_NAME: 'Conversion stats',
-  AUDIT_SHEET: 'Conversion stats audit',
   HEADER_ROW: 1,
   DATA_START_ROW: 2,
 
@@ -52,114 +51,6 @@ function render_org_conversion_stats() {
       throw new Error('Combined stats renderer not available.')
     }
     return COMBINED_renderConversionOnboarding_({ logStepName: 'render_org_conversion_stats' })
-  })
-}
-
-function render_org_conversion_audit() {
-  CONV_lockWrapCompat_('render_org_conversion_audit', () => {
-    const t0 = new Date()
-    const ss = SpreadsheetApp.getActive()
-
-    const shOut = CONV_getOrCreateSheetCompat_(ss, CONV_CFG.AUDIT_SHEET)
-    const shOrgs = ss.getSheetByName(CONV_CFG.INPUTS.CLERK_ORGS)
-    const shArrRaw = ss.getSheetByName(CONV_CFG.INPUTS.ARR_RAW_DATA)
-
-    if (!shOrgs) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.CLERK_ORGS}`)
-    if (!shArrRaw) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ARR_RAW_DATA}`)
-
-    const tz = Session.getScriptTimeZone()
-
-    const orgs = CONV_readSheetObjects_(shOrgs, 1)
-    const arrRawRows = CONV_readSheetObjects_(shArrRaw, CONV_CFG.ARR_RAW_HEADER_ROW)
-
-    const orgInfoById = CONV_buildOrgInfoById_(arrRawRows)
-
-    const headers = [
-      'org_id',
-      'app_org_id',
-      'org_name',
-      'org_created_at',
-      'cohort_month',
-      'trial_start_date',
-      'trial_end_date',
-      'subscription_start_date',
-      'purchase_date',
-      'clean_window_start',
-      'clean_window_end',
-      'has_conversion',
-      'clean_conversion',
-      'notes'
-    ]
-
-    const rows = []
-    orgs.forEach(o => {
-      const orgId = CONV_str_(o.org_id)
-      if (!orgId) return
-
-      const orgName = CONV_str_(o.org_name) || CONV_str_(o.org_slug)
-      const orgCreatedAt = CONV_parseDate_(o.created_at || o.org_created_at)
-      const cohortMonth = orgCreatedAt ? Utilities.formatDate(orgCreatedAt, tz, CONV_CFG.MONTH_FMT) : ''
-
-      const info = orgInfoById.get(orgId) || {}
-      const appOrgId = CONV_str_(info.appOrgId)
-      const trialStart = info.trialStartDate || null
-      const trialEnd = info.trialEndDate || null
-      const subscriptionStart = info.subscriptionStartDate || null
-      const purchaseDate = info.purchaseDate || null
-
-      const windowStart = trialStart
-      const windowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
-
-      const hasConversion = !!subscriptionStart
-      const cleanConversion =
-        !!windowStart &&
-        !!windowEnd &&
-        !!purchaseDate &&
-        CONV_isWithinRange_(purchaseDate, windowStart, windowEnd)
-
-      const notes = []
-      if (!trialStart) notes.push('missing_trial_start')
-      if (!trialEnd) notes.push('missing_trial_end')
-      if (!purchaseDate) notes.push('missing_purchase_date')
-
-      rows.push([
-        orgId,
-        appOrgId,
-        orgName,
-        orgCreatedAt || '',
-        cohortMonth,
-        trialStart || '',
-        trialEnd || '',
-        subscriptionStart || '',
-        purchaseDate || '',
-        windowStart || '',
-        windowEnd || '',
-        hasConversion,
-        cleanConversion,
-        notes.join(';')
-      ])
-    })
-
-    rows.sort((a, b) => {
-      const aC = String(a[3] || '')
-      const bC = String(b[3] || '')
-      if (aC !== bC) return aC.localeCompare(bC)
-      return String(a[1] || '').localeCompare(String(b[1] || ''))
-    })
-
-    shOut.clearContents()
-    shOut.getRange(CONV_CFG.HEADER_ROW, 1, 1, headers.length).setValues([headers])
-    if (rows.length) {
-      CONV_batchSetValuesCompat_(shOut, CONV_CFG.DATA_START_ROW, 1, rows, 2000)
-    }
-
-    CONV_applyAuditFormats_(shOut, rows.length, headers)
-    shOut.setFrozenRows(CONV_CFG.HEADER_ROW)
-    shOut.autoResizeColumns(1, headers.length)
-
-    const seconds = (new Date() - t0) / 1000
-    CONV_writeSyncLogCompat_('render_org_conversion_audit', 'ok', rows.length, rows.length, seconds, '')
-    return { rows_out: rows.length }
   })
 }
 
@@ -388,33 +279,6 @@ function CONV_applyFormatsAt_(sheet, headerRow, dataStartRow, numDataRows) {
       .setFontWeight('bold')
       .setBackground('#F6F4F0')
   }
-}
-
-function CONV_applyAuditFormats_(sheet, numDataRows, headers) {
-  const headerRange = sheet.getRange(1, 1, 1, headers.length)
-  headerRange.setFontWeight('bold').setBackground('#F3F3F3')
-
-  if (!numDataRows) return
-
-  const startRow = CONV_CFG.DATA_START_ROW
-  const nRows = numDataRows
-
-  const dateHeaders = new Set([
-    'org_created_at',
-    'trial_start_date',
-    'trial_end_date',
-    'subscription_start_date',
-    'purchase_date',
-    'clean_window_start',
-    'clean_window_end'
-  ])
-
-  headers.forEach((h, idx) => {
-    const col = idx + 1
-    if (dateHeaders.has(h)) {
-      sheet.getRange(startRow, col, nRows, 1).setNumberFormat(CONV_CFG.DATE_FMT)
-    }
-  })
 }
 
 /* =========================

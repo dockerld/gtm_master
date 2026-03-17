@@ -24,10 +24,6 @@ function send_ring_weekly_email() {
   return send_ring_weekly_email_to_(RING_WEEKLY_CFG.RECIPIENTS)
 }
 
-function send_ring_weekly_email_test_docker() {
-  return send_ring_weekly_email_to_(['docker@pingassistant.com'])
-}
-
 function send_ring_weekly_email_to_(recipients) {
   const ss = SpreadsheetApp.getActive()
   const sh = ss.getSheetByName(RING_WEEKLY_CFG.SHEET_NAME)
