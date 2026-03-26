@@ -40,33 +40,26 @@ const CANON_ORGS_CFG = {
     POSTHOG_ORG_SUBS: 'raw_posthog_org_subscriptions',
     POSTHOG_PROMO_REDEMPTIONS: 'promo_redemptions',
     ORG_BILLING_MAP: 'org_billing_map', // optional fallback
+    ORG_SUBSCRIPTION_INFO: 'org_subscription_info',
     CANON_ORGS: 'canon_orgs'
   },
 
   CANON_HEADERS: [
     'org_id',
     'app_org_id',
-    'clerk_org_id',
     'org_name',
     'org_slug',
     'org_created_at',
     'posthog_org_name',
-    'posthog_org_slug',
-    'posthog_org_status',
-    'posthog_org_billing_email',
-    'posthog_org_owner_user_id',
     'posthog_org_created_at',
-    'posthog_org_updated_at',
+
+    'owner_user_id',
+    'owner_email',
+    'owner_name',
 
     'is_paying',
     'seats',
     'promo_code',
-
-    // manual fields (preserved)
-    'service',
-    'white_glove',
-    'in_onboarding',
-    'onboarding_note',
 
     // derived convenience/debugging
     'billing_email',
@@ -96,20 +89,6 @@ const CANON_ORGS_CFG = {
     'stripe_mrr_discounted',
     'stripe_mrr_full_price',
 
-    // PostHog org_subscriptions rollups
-    'posthog_org_subscription_count',
-    'posthog_active_subscription_count',
-    'posthog_trialing_subscription_count',
-    'posthog_full_seat_count',
-    'posthog_lite_seat_count',
-    'posthog_statuses',
-    'posthog_owner_user_ids',
-    'posthog_stripe_subscription_ids',
-    'posthog_latest_updated_at',
-    'posthog_latest_subscription_id',
-    'posthog_latest_subscription_status',
-    'posthog_latest_active_subscription_id',
-
     // Active subscription snapshot (single selected active/paying subscription)
     'active_subscription_id',
     'active_subscription_status',
@@ -120,6 +99,10 @@ const CANON_ORGS_CFG = {
     'active_subscription_arr_discounted',
     'active_subscription_arr_full_price',
     'active_subscription_promo_codes',
+
+    // CRM-derived status
+    'org_status',
+    'trial_ends_at',
 
     // App promo redemption rollups (PostHog promo_redemptions)
     'app_promo_codes',
@@ -139,7 +122,7 @@ const CANON_ORGS_CFG = {
     'updated_at'
   ],
 
-  MANUAL_FIELDS: new Set(['service', 'white_glove', 'in_onboarding', 'onboarding_note']),
+  MANUAL_FIELDS: new Set([]),
 
   PAYING_STATUSES: new Set(['active', 'trialing'])
 }
@@ -173,6 +156,8 @@ function build_canon_orgs() {
       const posthogOrgsRows = shPosthogOrgs ? readRaw_(shPosthogOrgs, 1) : { rows: [], has: () => false, col: () => -1 }
       const posthogOrgSubsRows = shPosthogOrgSubs ? readRaw_(shPosthogOrgSubs, 1) : { rows: [], has: () => false, col: () => -1 }
       const posthogPromoRows = shPosthogPromoRedemptions ? readRaw_(shPosthogPromoRedemptions, 1) : { rows: [], has: () => false, col: () => -1 }
+      const shOrgSubInfo = ss.getSheetByName(CANON_ORGS_CFG.SHEETS.ORG_SUBSCRIPTION_INFO)
+      const orgSubInfoRows = shOrgSubInfo ? readRaw_(shOrgSubInfo, 1) : { rows: [], has: () => false, col: () => -1 }
       const asOfNow = new Date()
 
       // Optional fallback maps
@@ -201,11 +186,14 @@ function build_canon_orgs() {
 
       // ---- 2) Build: clerk_user_id -> Stripe linkage from Clerk metadata ----
       const clerkUserToStripe = new Map()
+      const clerkUserById = new Map()
       userRows.rows.forEach(r => {
         const clerkUserId = orgBuildStr_(orgBuildRawGet_(userRows, r, ['clerk_user_id', 'user_id', 'id']))
         if (!clerkUserId) return
 
         const email = orgBuildStr_(orgBuildRawGet_(userRows, r, ['email']))
+        const name = orgBuildStr_(orgBuildRawGet_(userRows, r, ['name', 'first_name']))
+        clerkUserById.set(clerkUserId, { email, name })
         let stripeSubId = orgBuildStr_(orgBuildRawGet_(userRows, r, [
           'stripe_subscription_id',
           'stripesubscriptionid',
@@ -241,9 +229,6 @@ function build_canon_orgs() {
       // ---- 3) Build: subscription_id -> Stripe aggregates ----
       const stripeBySubId = new Map()
       const stripeSubIdsByMetadataOrgId = new Map()
-      const stripeCustomerIdsByMetadataOrgId = new Map()
-      const stripeSubIdsByCustomerEmailKey = new Map()
-      const stripeCustomerIdsByCustomerEmailKey = new Map()
       stripeRows.rows.forEach(r => {
         const subId = orgBuildStr_(orgBuildRawGet_(stripeRows, r, [
           'stripe_subscription_id',
@@ -270,6 +255,7 @@ function build_canon_orgs() {
         const amount = orgBuildNum_(orgBuildRawGet_(stripeRows, r, ['amount']))
         const createdAt = orgBuildStr_(orgBuildRawGet_(stripeRows, r, ['created_at']))
         const currentPeriodEnd = orgBuildStr_(orgBuildRawGet_(stripeRows, r, ['current_period_end']))
+        const trialEnd = orgBuildStr_(orgBuildRawGet_(stripeRows, r, ['trial_end']))
         const discountSummary = orgBuildStripeDiscountSummaryFromRaw_(stripeRows, r, asOfNow, amount)
         const arrFullPrice = orgBuildAnnualizeAmount_(amount, interval, intervalCount)
         const arrDiscounted = orgBuildAnnualizeAmount_(discountSummary.discounted_amount, interval, intervalCount)
@@ -297,6 +283,7 @@ function build_canon_orgs() {
           active_discount_percents: discountSummary.active_percent_off,
           active_discount_amount_off: discountSummary.active_amount_off,
           active_discount_durations: discountSummary.active_duration,
+          trial_end: trialEnd,
           metadata_org_id: metadataOrgId,
           customer_email_key: customerEmailKey
         })
@@ -304,19 +291,6 @@ function build_canon_orgs() {
         if (metadataOrgId) {
           if (!stripeSubIdsByMetadataOrgId.has(metadataOrgId)) stripeSubIdsByMetadataOrgId.set(metadataOrgId, new Set())
           stripeSubIdsByMetadataOrgId.get(metadataOrgId).add(subId)
-          if (customerId) {
-            if (!stripeCustomerIdsByMetadataOrgId.has(metadataOrgId)) stripeCustomerIdsByMetadataOrgId.set(metadataOrgId, new Set())
-            stripeCustomerIdsByMetadataOrgId.get(metadataOrgId).add(customerId)
-          }
-        }
-
-        if (customerEmailKey) {
-          if (!stripeSubIdsByCustomerEmailKey.has(customerEmailKey)) stripeSubIdsByCustomerEmailKey.set(customerEmailKey, new Set())
-          stripeSubIdsByCustomerEmailKey.get(customerEmailKey).add(subId)
-          if (customerId) {
-            if (!stripeCustomerIdsByCustomerEmailKey.has(customerEmailKey)) stripeCustomerIdsByCustomerEmailKey.set(customerEmailKey, new Set())
-            stripeCustomerIdsByCustomerEmailKey.get(customerEmailKey).add(customerId)
-          }
         }
       })
 
@@ -329,10 +303,16 @@ function build_canon_orgs() {
       })
 
       // ---- 4) Build PostHog org_subscriptions aggregates ----
+      // Build direct clerk_org_id → app_org_id map from raw_posthog_orgs
+      const appOrgIdByClerkOrgId = new Map()
       const posthogOrgById = new Map()
       posthogOrgsRows.rows.forEach(r => {
         const id = orgBuildStr_(orgBuildRawGet_(posthogOrgsRows, r, ['app_org_id', 'org_id']))
         if (!id || posthogOrgById.has(id)) return
+        const clerkId = orgBuildStr_(orgBuildRawGet_(posthogOrgsRows, r, ['clerk_org_id']))
+        if (clerkId && !appOrgIdByClerkOrgId.has(clerkId)) {
+          appOrgIdByClerkOrgId.set(clerkId, id)
+        }
         posthogOrgById.set(id, {
           org_name: orgBuildStr_(orgBuildRawGet_(posthogOrgsRows, r, ['org_name', 'name'])),
           org_slug: orgBuildStr_(orgBuildRawGet_(posthogOrgsRows, r, ['org_slug', 'slug'])),
@@ -422,9 +402,26 @@ function build_canon_orgs() {
         agg.latest_redeemed_at = orgBuildMaxIso_(agg.latest_redeemed_at, redeemedAt)
       })
 
-      // ---- 6) Preserve manual fields from existing canon_orgs ----
+      // ---- 5b) Build org_subscription_info index for org_status ----
+      // Pick best subscription per org: active > trialing > everything else
+      const ORG_SUB_STATUS_RANK = { 'active': 3, 'trialing': 2 }
+      const orgSubInfoByOrgId = new Map()
+      orgSubInfoRows.rows.forEach(r => {
+        const oid = orgBuildStr_(orgBuildRawGet_(orgSubInfoRows, r, ['app_org_id', 'org_id']))
+        if (!oid) return
+        const status = orgBuildStr_(orgBuildRawGet_(orgSubInfoRows, r, ['status'])).toLowerCase()
+        const entry = {
+          status,
+          first_payment_at: orgBuildStr_(orgBuildRawGet_(orgSubInfoRows, r, ['first_payment_at'])),
+          has_payment_method: orgBuildStr_(orgBuildRawGet_(orgSubInfoRows, r, ['has_payment_method']))
+        }
+        const existing = orgSubInfoByOrgId.get(oid)
+        if (!existing || (ORG_SUB_STATUS_RANK[status] || 0) > (ORG_SUB_STATUS_RANK[existing.status] || 0)) {
+          orgSubInfoByOrgId.set(oid, entry)
+        }
+      })
+
       const canonSheet = getOrCreateSheet(ss, CANON_ORGS_CFG.SHEETS.CANON_ORGS)
-      const existing = readMaybeCanon_(canonSheet)
 
       // ---- 7) Build output rows ----
       const updatedAt = new Date()
@@ -437,6 +434,8 @@ function build_canon_orgs() {
         const orgName = orgBuildStr_(orgBuildRawGet_(orgRows, o, ['org_name']))
         const orgSlug = orgBuildStr_(orgBuildRawGet_(orgRows, o, ['org_slug', 'slug']))
         const orgCreatedAt = orgBuildStr_(orgBuildRawGet_(orgRows, o, ['created_at', 'org_created_at']))
+        const ownerUserId = orgBuildStr_(orgBuildRawGet_(orgRows, o, ['org_owner_user_id']))
+        const ownerInfo = ownerUserId ? clerkUserById.get(ownerUserId) : null
 
         const mapped = billingMap[orgId] || {}
         const mappedSubId = orgBuildStr_(mapped.stripe_subscription_id)
@@ -446,92 +445,33 @@ function build_canon_orgs() {
 
         const memberIds = orgToMemberUserIds.get(orgId) || new Set()
         const memberEmailKeys = orgToMemberEmailKeys.get(orgId) || new Set()
-        const appOrgIdCounts = new Map()
-        function addAppOrgIdCandidate_(candidate, weight) {
-          const id = orgBuildStr_(candidate)
-          if (!id) return
-          if (orgBuildLooksLikeClerkOrgId_(id)) return
-          appOrgIdCounts.set(id, orgBuildNum_(appOrgIdCounts.get(id)) + Math.max(1, orgBuildNum_(weight) || 1))
-        }
 
-        const posthogAggFallback = posthogOrgAggByOrgId.get(orgId) || null
+        // Direct lookup: clerk_org_id → app_org_id from postgres.orgs.external_id
+        const appOrgId = appOrgIdByClerkOrgId.get(orgId) || ''
+
+        const posthogAgg = (appOrgId && posthogOrgAggByOrgId.get(appOrgId))
+          || posthogOrgAggByOrgId.get(orgId)
+          || null
+
         const linkedSubIds = new Set()
         const linkedCustomerIds = new Set()
         const linkedVia = new Set()
-        let memberWithStripeSubCount = 0
-        let memberWithCustomerIdCount = 0
         let memberEmailFallback = ''
 
-        // Strong path 1: explicit org id in Stripe metadata
+        // Primary path: postgres.org_subscriptions (org_id → stripe_subscription_id)
+        if (posthogAgg && posthogAgg.sub_ids && posthogAgg.sub_ids.size) {
+          posthogAgg.sub_ids.forEach(subId => linkedSubIds.add(subId))
+          linkedVia.add('posthog_org_subscriptions')
+        }
+
+        // Secondary: Stripe metadata org_id (catches any subs not yet in org_subscriptions)
         const metadataSubSet = stripeSubIdsByMetadataOrgId.get(orgId)
         if (metadataSubSet && metadataSubSet.size) {
           metadataSubSet.forEach(subId => linkedSubIds.add(subId))
           linkedVia.add('stripe_metadata_org_id')
         }
-        const metadataCustomerSet = stripeCustomerIdsByMetadataOrgId.get(orgId)
-        if (metadataCustomerSet && metadataCustomerSet.size) {
-          metadataCustomerSet.forEach(custId => linkedCustomerIds.add(custId))
-          linkedVia.add('stripe_metadata_org_customer_id')
-        }
 
-        // Strong path 2: org-level PostHog subscription mapping
-        if (posthogAggFallback && posthogAggFallback.sub_ids && posthogAggFallback.sub_ids.size) {
-          posthogAggFallback.sub_ids.forEach(subId => linkedSubIds.add(subId))
-          linkedVia.add('posthog_org_subscriptions')
-        }
-
-        memberIds.forEach(uid => {
-          const link = clerkUserToStripe.get(uid)
-          if (!link) return
-
-          const subId = orgBuildStr_(link.stripe_subscription_id)
-          const custId = orgBuildStr_(link.stripe_customer_id)
-
-          if (subId) {
-            linkedSubIds.add(subId)
-            memberWithStripeSubCount += 1
-            linkedVia.add('member_user_sub_id')
-          }
-          if (custId) {
-            linkedCustomerIds.add(custId)
-            memberWithCustomerIdCount += 1
-            linkedVia.add('member_user_customer_id')
-          }
-          if (!memberEmailFallback && link.email) memberEmailFallback = orgBuildStr_(link.email)
-        })
-        if (!memberEmailFallback && memberEmailKeys.size) {
-          memberEmailFallback = orgBuildFirstFromSet_(memberEmailKeys)
-        }
-
-        linkedCustomerIds.forEach(custId => {
-          const subSet = stripeSubIdsByCustomerId.get(custId)
-          if (!subSet || !subSet.size) return
-          subSet.forEach(subId => linkedSubIds.add(subId))
-          linkedVia.add('member_customer_id_to_subscriptions')
-        })
-
-        linkedSubIds.forEach(subId => {
-          const posthogOrgId = orgBuildStr_(posthogOrgIdBySubId.get(subId))
-          if (posthogOrgId) addAppOrgIdCandidate_(posthogOrgId, 8)
-          const s = stripeBySubId.get(subId)
-          if (s && s.metadata_org_id) {
-            const metaOrgId = orgBuildStr_(s.metadata_org_id)
-            addAppOrgIdCandidate_(metaOrgId, posthogOrgAggByOrgId.has(metaOrgId) ? 4 : 1)
-          }
-        })
-        linkedCustomerIds.forEach(custId => {
-          const posthogOrgId = orgBuildStr_(posthogOrgIdByCustomerId.get(custId))
-          if (posthogOrgId) addAppOrgIdCandidate_(posthogOrgId, 5)
-        })
-
-        const appOrgId = orgBuildPickBestScoredKey_(appOrgIdCounts)
-        const posthogAgg = (appOrgId && posthogOrgAggByOrgId.get(appOrgId))
-          || posthogAggFallback
-          || null
-        const posthogOrgInfo = (appOrgId && posthogOrgById.get(appOrgId))
-          || posthogOrgById.get(orgId)
-          || null
-
+        // Tertiary: manual org_billing_map
         if (mappedSubId) {
           linkedSubIds.add(mappedSubId)
           linkedVia.add('org_billing_map_sub_id')
@@ -546,34 +486,24 @@ function build_canon_orgs() {
           }
         }
 
-        // Weak fallback: email-key -> Stripe customer_email.
-        // Only apply when no stronger subscription link exists.
-        if (linkedSubIds.size === 0) {
-          memberEmailKeys.forEach(emailKey => {
-            const subSet = stripeSubIdsByCustomerEmailKey.get(emailKey)
-            if (subSet && subSet.size) {
-              subSet.forEach(subId => linkedSubIds.add(subId))
-              linkedVia.add('member_email_to_customer_email')
-            }
-            const customerSet = stripeCustomerIdsByCustomerEmailKey.get(emailKey)
-            if (customerSet && customerSet.size) {
-              customerSet.forEach(custId => linkedCustomerIds.add(custId))
-              linkedVia.add('member_email_to_customer_email_customer_id')
-            }
-          })
-          if (mappedEmailKey) {
-            const mappedEmailSubSet = stripeSubIdsByCustomerEmailKey.get(mappedEmailKey)
-            if (mappedEmailSubSet && mappedEmailSubSet.size) {
-              mappedEmailSubSet.forEach(subId => linkedSubIds.add(subId))
-              linkedVia.add('org_billing_map_email_to_customer_email')
-            }
-            const mappedEmailCustomerSet = stripeCustomerIdsByCustomerEmailKey.get(mappedEmailKey)
-            if (mappedEmailCustomerSet && mappedEmailCustomerSet.size) {
-              mappedEmailCustomerSet.forEach(custId => linkedCustomerIds.add(custId))
-              linkedVia.add('org_billing_map_email_to_customer_email_customer_id')
-            }
-          }
+        // Resolve customer IDs from linked subscriptions
+        linkedSubIds.forEach(subId => {
+          const s = stripeBySubId.get(subId)
+          if (s && s.billing_customer_id) linkedCustomerIds.add(s.billing_customer_id)
+        })
+
+        // Member email fallback (for owner info, not linkage)
+        memberIds.forEach(uid => {
+          const link = clerkUserToStripe.get(uid)
+          if (link && link.email && !memberEmailFallback) memberEmailFallback = orgBuildStr_(link.email)
+        })
+        if (!memberEmailFallback && memberEmailKeys.size) {
+          memberEmailFallback = orgBuildFirstFromSet_(memberEmailKeys)
         }
+
+        const posthogOrgInfo = (appOrgId && posthogOrgById.get(appOrgId))
+          || posthogOrgById.get(orgId)
+          || null
 
         const stripeSubIdsFound = new Set()
         const stripeStatuses = new Set()
@@ -661,20 +591,14 @@ function build_canon_orgs() {
         Array.from(stripePromoCodes).forEach(code => combinedPromoCodesSet.add(code))
         appPromoCodes.forEach(code => combinedPromoCodesSet.add(code))
 
-        const prior =
-          existing.byClerkOrgId[orgId] ||
-          (appOrgId ? existing.byAppOrgId[appOrgId] : null) ||
-          existing.byOrgId[orgId] ||
-          {}
-        const service = prior.service || ''
-        const whiteGlove = prior.white_glove === true
-        const inOnboarding = prior.in_onboarding === true
-        const onboardingNote = prior.onboarding_note || ''
-
         const isPaying =
           (stripeActiveSubCount + stripeTrialingSubCount) > 0 ||
           (!!posthogAgg && (posthogAgg.active_count + posthogAgg.trialing_count) > 0)
         const activeStripe = orgBuildPickPrimaryActiveStripeSubscription_(linkedSubIds, stripeBySubId)
+
+        // Compute org_status using Ring-style bucket logic
+        const orgStatus = orgBuildComputeOrgStatus_(appOrgId, isPaying, activeStripe, orgSubInfoByOrgId, stripeStatuses)
+        const trialEndsAt = activeStripe ? activeStripe.trial_end : ''
 
         const seatsOut =
           stripeSeatsPayingSum > 0
@@ -704,14 +628,8 @@ function build_canon_orgs() {
 
         const mappingNotes = []
         if (memberIds.size === 0) mappingNotes.push('no_clerk_memberships')
-        if (memberWithStripeSubCount === 0 && memberWithCustomerIdCount === 0) {
-          mappingNotes.push('no_stripe_ids_on_clerk_members')
-        }
         if (linkedSubIds.size === 0) mappingNotes.push('no_linked_stripe_subscription_ids')
         if (linkedSubIds.size > 1) mappingNotes.push('multiple_linked_stripe_subscription_ids')
-        if (linkedVia.has('member_email_to_customer_email') || linkedVia.has('org_billing_map_email_to_customer_email')) {
-          mappingNotes.push('linked_via_email_fallback')
-        }
         if (linkedSubIds.size > 0 && stripeSubIdsFound.size === 0) {
           mappingNotes.push('linked_subscription_ids_missing_in_raw_stripe_subscriptions')
         }
@@ -722,26 +640,19 @@ function build_canon_orgs() {
         outRows.push([
           orgId,
           appOrgId,
-          orgId,
           orgName,
           orgSlug,
           orgCreatedAt,
           posthogOrgInfo ? posthogOrgInfo.org_name : '',
-          posthogOrgInfo ? posthogOrgInfo.org_slug : '',
-          posthogOrgInfo ? posthogOrgInfo.org_status : '',
-          posthogOrgInfo ? posthogOrgInfo.billing_email : '',
-          posthogOrgInfo ? posthogOrgInfo.owner_user_id : '',
           posthogOrgInfo ? posthogOrgInfo.created_at : '',
-          posthogOrgInfo ? posthogOrgInfo.updated_at : '',
+
+          ownerUserId,
+          ownerInfo ? ownerInfo.email : '',
+          ownerInfo ? ownerInfo.name : '',
 
           isPaying === true,
           seatsOut,
           promoCodePrimary,
-
-          service,
-          whiteGlove,
-          inOnboarding,
-          onboardingNote,
 
           billingEmail,
           billingCustomerId,
@@ -769,19 +680,6 @@ function build_canon_orgs() {
           stripeArrDiscounted / 12,
           stripeArrFullPrice / 12,
 
-          posthogAgg ? posthogAgg.sub_ids.size : 0,
-          posthogAgg ? posthogAgg.active_count : 0,
-          posthogAgg ? posthogAgg.trialing_count : 0,
-          posthogAgg ? posthogAgg.full_seat_count : 0,
-          posthogAgg ? posthogAgg.lite_seat_count : 0,
-          posthogAgg ? orgBuildJoinSet_(posthogAgg.statuses) : '',
-          posthogAgg ? orgBuildJoinSet_(posthogAgg.owner_user_ids) : '',
-          posthogAgg ? orgBuildJoinSet_(posthogAgg.sub_ids) : '',
-          posthogAgg ? posthogAgg.latest_updated_at : '',
-          posthogOrgInfo ? posthogOrgInfo.latest_subscription_id : '',
-          posthogOrgInfo ? posthogOrgInfo.latest_subscription_status : '',
-          posthogOrgInfo ? posthogOrgInfo.latest_active_subscription_id : '',
-
           activeStripe ? activeStripe.subscription_id : '',
           activeStripe ? activeStripe.status : '',
           activeStripe ? activeStripe.interval : '',
@@ -792,6 +690,9 @@ function build_canon_orgs() {
           activeStripe ? activeStripe.arr_full_price : '',
           activeStripe ? orgBuildJoinSet_(activeStripe.promo_codes || []) : '',
 
+          orgStatus,
+          trialEndsAt,
+
           appPromoCodesText,
           appPromo ? appPromo.promo_codes.size : 0,
           appPromo ? appPromo.redemption_count : 0,
@@ -800,8 +701,8 @@ function build_canon_orgs() {
           combinedPromoCodesText,
 
           memberIds.size,
-          memberWithStripeSubCount,
-          memberWithCustomerIdCount,
+          0,
+          0,
           orgBuildJoinSet_(linkedVia),
           mappingNotes.join('; '),
 
@@ -909,58 +810,6 @@ function readRaw_(sheet, headerRow) {
   }
 }
 
-/**
- * Read existing canon_orgs so we can preserve manual fields
- * Returns:
- *  - byOrgId: { [org_id]: {service, white_glove, in_onboarding, onboarding_note} }
- */
-function readMaybeCanon_(sheet) {
-  const lastRow = sheet.getLastRow()
-  const lastCol = sheet.getLastColumn()
-  if (lastRow < 2) return { byOrgId: {}, byAppOrgId: {}, byClerkOrgId: {} }
-
-  const header = sheet.getRange(1, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim())
-  const headerMap = {}
-  header.forEach((h, i) => {
-    if (h) headerMap[h.toLowerCase()] = i + 1
-  })
-
-  if (!headerMap['org_id']) return { byOrgId: {}, byAppOrgId: {}, byClerkOrgId: {} }
-
-  const data = sheet.getRange(2, 1, lastRow - 1, lastCol).getValues()
-
-  const cOrg = headerMap['org_id'] - 1
-  const cAppOrg = headerMap['app_org_id'] ? headerMap['app_org_id'] - 1 : null
-  const cClerkOrg = headerMap['clerk_org_id'] ? headerMap['clerk_org_id'] - 1 : null
-  const cService = headerMap['service'] ? headerMap['service'] - 1 : null
-  const cWG = headerMap['white_glove'] ? headerMap['white_glove'] - 1 : null
-  const cOnb = headerMap['in_onboarding'] ? headerMap['in_onboarding'] - 1 : null
-  const cNote = headerMap['onboarding_note'] ? headerMap['onboarding_note'] - 1 : null
-
-  const byOrgId = {}
-  const byAppOrgId = {}
-  const byClerkOrgId = {}
-
-  data.forEach(r => {
-    const orgId = String(r[cOrg] || '').trim()
-    if (!orgId) return
-
-    const appOrgId = cAppOrg != null ? String(r[cAppOrg] || '').trim() : ''
-    const clerkOrgId = cClerkOrg != null ? String(r[cClerkOrg] || '').trim() : orgId
-
-    const payload = {
-      service: cService != null ? String(r[cService] || '') : '',
-      white_glove: cWG != null ? r[cWG] === true : false,
-      in_onboarding: cOnb != null ? r[cOnb] === true : false,
-      onboarding_note: cNote != null ? String(r[cNote] || '') : ''
-    }
-    byOrgId[orgId] = payload
-    if (appOrgId) byAppOrgId[appOrgId] = payload
-    if (clerkOrgId) byClerkOrgId[clerkOrgId] = payload
-  })
-
-  return { byOrgId: byOrgId, byAppOrgId: byAppOrgId, byClerkOrgId: byClerkOrgId }
-}
 
 function writeCanonOverwrite_(sheet, headers, rows) {
   sheet.clearContents()
@@ -1028,21 +877,6 @@ function orgBuildFirstFromSet_(setLike) {
   return clean.length ? clean[0] : ''
 }
 
-function orgBuildPickBestScoredKey_(countsMap) {
-  if (!(countsMap instanceof Map) || countsMap.size === 0) return ''
-  let bestKey = ''
-  let bestScore = -Infinity
-  countsMap.forEach((score, key) => {
-    const k = orgBuildStr_(key)
-    if (!k) return
-    const s = orgBuildNum_(score)
-    if (s > bestScore || (s === bestScore && k < bestKey)) {
-      bestScore = s
-      bestKey = k
-    }
-  })
-  return bestKey
-}
 
 function orgBuildPickPrimaryActiveStripeSubscription_(subIdSet, stripeBySubId) {
   let best = null
@@ -1163,9 +997,6 @@ function orgBuildExtractOrgIdFromMetadata_(metadataRaw) {
   return found
 }
 
-function orgBuildLooksLikeClerkOrgId_(id) {
-  return /^org_[A-Za-z0-9]/.test(orgBuildStr_(id))
-}
 
 function orgBuildStripePromoCodesFromRaw_(stripeRows, row) {
   const out = new Set()
@@ -1306,4 +1137,32 @@ function orgBuildIsDiscountActiveNow_(detail, asOfDate) {
     return asOf < until
   }
   return false
+}
+
+/**
+ * Compute org_status for CRM sync (mirrors Ring bucket logic):
+ *   Paid            = active + has first payment
+ *   Intent to Pay   = (active no payment yet OR trialing) + has payment method
+ *   Trialing        = active/trialing without payment method or first payment
+ *   Expired         = canceled, expired, or anything else
+ */
+function orgBuildComputeOrgStatus_(appOrgId, isPaying, activeStripe, orgSubInfoByOrgId, stripeStatuses) {
+  const subInfo = appOrgId ? orgSubInfoByOrgId.get(appOrgId) : null
+
+  if (subInfo) {
+    const status = subInfo.status
+    const hasFirstPayment = !!subInfo.first_payment_at
+    const hasPaymentMethod = orgBuildStr_(subInfo.has_payment_method).toLowerCase()
+    const hasPM = hasPaymentMethod === 'true' || hasPaymentMethod === '1' || hasPaymentMethod === 'yes'
+
+    if (status === 'active' && hasFirstPayment) return 'Paid'
+    if (status === 'active' && !hasFirstPayment && hasPM) return 'Intent to Pay'
+    if (status === 'trialing' && hasPM) return 'Intent to Pay'
+    if (status === 'active' && !hasFirstPayment && !hasPM) return 'Trialing'
+    if (status === 'trialing' && !hasPM) return 'Trialing'
+    if (status) return 'Expired'
+  }
+
+  // No org_subscription_info record → Expired
+  return 'Expired'
 }

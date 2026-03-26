@@ -102,8 +102,13 @@ function stripe_pull_subscriptions_to_raw() {
     'promo_code',
     'promo_code_all',
 
+    'trial_start',
+    'trial_end',
+
     'cancel_at_period_end',
     'canceled_at',
+    'current_period_end',
+    'cancellation_reason',
 
     'metadata_json',
     'metadata_exclude_from_ring',
@@ -473,6 +478,24 @@ function stripe_pull_subscriptions_to_raw() {
     const md = sub.metadata || {}
     const mdExclude = strOrBlank_(md[STRIPE_EXCLUDE_META_KEY])
     const metadataJson = stripeSafeJson_(md)
+    const cancelDetails = (sub && sub.cancellation_details) ? sub.cancellation_details : {}
+    const cancelFeedback = strOrBlank_(cancelDetails.feedback).toLowerCase()
+    const cancelReasonRaw = strOrBlank_(cancelDetails.reason).toLowerCase()
+    const cancelComment = strOrBlank_(cancelDetails.comment)
+    const cancelReasonMap = {
+      switched_service: 'I found an alternative',
+      too_expensive: 'Too expensive',
+      unused: 'I no longer need it',
+      missing_features: 'Missing features',
+      customer_service: 'Customer service',
+      low_quality: 'Low quality',
+      too_complex: 'Too complex',
+      other: 'Other'
+    }
+    let cancellationReason = cancelReasonMap[cancelFeedback] || cancelReasonMap[cancelReasonRaw] || ''
+    if (!cancellationReason && cancelFeedback) cancellationReason = cancelFeedback.replace(/_/g, ' ')
+    if (!cancellationReason && cancelReasonRaw) cancellationReason = cancelReasonRaw.replace(/_/g, ' ')
+    if (!cancellationReason && cancelComment) cancellationReason = cancelComment
 
     return [
       subId,
@@ -520,8 +543,13 @@ function stripe_pull_subscriptions_to_raw() {
       promoCode,
       promoCodeAll.join(', '),
 
+      stripeUnixToIso_(sub.trial_start),
+      stripeUnixToIso_(sub.trial_end),
+
       sub.cancel_at_period_end === true,
       stripeUnixToIso_(sub.canceled_at),
+      stripeUnixToIso_(sub.current_period_end),
+      cancellationReason,
 
       metadataJson,
       mdExclude,
