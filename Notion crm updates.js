@@ -433,7 +433,7 @@ function sync_orgs_to_notion() {
     const createdAt = parseDate_(org.org_created_at)
     const ownerEmail = str_(org.owner_email)
     const domain = getDomain_(ownerEmail)
-    const trialEndDate = parseDate_(org.trial_ends_at)
+    const trialEndDate = parseDateOnly_(org.trial_ends_at)
 
     // Dedup: if a company exists with this domain but no org_id, link it instead
     if (domain && !CRM_PERSONAL_DOMAINS.has(domain) && existingByDomain.has(domain)) {
@@ -522,7 +522,7 @@ function sync_orgs_to_notion() {
     const createdAt = parseDate_(org.org_created_at)
     const ownerEmail = str_(org.owner_email)
     const domain = getDomain_(ownerEmail)
-    const trialEndDate = parseDate_(org.trial_ends_at)
+    const trialEndDate = parseDateOnly_(org.trial_ends_at)
     const sheetFirmSize = seatsToFirmSize_(seats)
     const companyName = notionGetTitleAny_(company) || orgId
 
@@ -1115,6 +1115,12 @@ function parseDate_(v) {
   const d = new Date(s)
   if (isNaN(d.getTime())) return ""
   return d.toISOString()
+}
+
+/** Returns just YYYY-MM-DD for Notion date-only columns. */
+function parseDateOnly_(v) {
+  const iso = parseDate_(v)
+  return iso ? iso.slice(0, 10) : ""
 }
 
 function tryUpgradeNotionContactTitle_(notion, contactId, desiredName) {
