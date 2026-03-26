@@ -429,7 +429,7 @@ function sync_orgs_to_notion() {
     const seats = Number(org.seats) || 0
     const firmSize = seatsToFirmSize_(seats)
     const isPaying = String(org.is_paying).toLowerCase() === "true" || org.is_paying === true
-    const subStatus = str_(org.active_subscription_status) || str_(org.org_status)
+    const subStatus = str_(org.org_status) || "Expired"
     const createdAt = parseDate_(org.org_created_at)
     const ownerEmail = str_(org.owner_email)
     const domain = getDomain_(ownerEmail)
@@ -518,7 +518,7 @@ function sync_orgs_to_notion() {
 
     const seats = Number(org.seats) || 0
     const isPaying = String(org.is_paying).toLowerCase() === "true" || org.is_paying === true
-    const subStatus = str_(org.active_subscription_status) || str_(org.org_status)
+    const subStatus = str_(org.org_status) || "Expired"
     const createdAt = parseDate_(org.org_created_at)
     const ownerEmail = str_(org.owner_email)
     const domain = getDomain_(ownerEmail)
