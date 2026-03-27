@@ -710,14 +710,19 @@ function audit_sauron_vs_ring_seats() {
   const shOrgSubs = ss.getSheetByName('org_subscription_info')
   const orgSubs = shOrgSubs ? SAURON_readSheetObjects_(shOrgSubs, 1) : []
 
-  // ── Build org map from canon_orgs ──
-  const orgMap = new Map()
+  // ── Build org map from canon_orgs, keyed by BOTH org_id and app_org_id ──
+  const orgMap = new Map()       // canonical key (org_id) -> entry
+  const appOrgIdToOrgId = new Map()  // app_org_id -> org_id (for bridging)
+  const orgNameToOrgId = new Map()   // normalized org name -> org_id (fallback)
   orgs.forEach(o => {
     const orgId = String(o.org_id || '').trim()
     if (!orgId) return
+    const appOrgId = String(o.app_org_id || '').trim()
+    const orgName = String(o.org_name || o.name || '').trim()
     orgMap.set(orgId, {
       orgId: orgId,
-      orgName: String(o.org_name || o.name || '').trim(),
+      appOrgId: appOrgId,
+      orgName: orgName,
       orgStatus: String(o.org_status || '').trim(),
       canonSeats: Number(o.seats || 0),
       sauronUsers: 0,
@@ -725,6 +730,8 @@ function audit_sauron_vs_ring_seats() {
       ringStatus: '',
       ringFirstPayment: ''
     })
+    if (appOrgId) appOrgIdToOrgId.set(appOrgId, orgId)
+    if (orgName) orgNameToOrgId.set(orgName.toLowerCase(), orgId)
   })
 
   // ── Count Sauron users per org (users with valid email in canon_users) ──
@@ -757,19 +764,30 @@ function audit_sauron_vs_ring_seats() {
     else if (status === 'trialing' && !hasPMBool) bucket = 'Trialing'
     else bucket = 'Expired/Other'
 
+    const orgName = String(r.org_name || r.name || '').trim()
     const prev = ringByOrgId.get(orgId)
     if (!prev) {
-      ringByOrgId.set(orgId, { seats, bucket, firstPayment: hasFirstPayment ? 'Yes' : '' })
+      ringByOrgId.set(orgId, { seats, bucket, firstPayment: hasFirstPayment ? 'Yes' : '', orgName })
     } else {
       prev.seats += seats
       if (bucket === 'Paid') prev.bucket = 'Paid'
       if (hasFirstPayment) prev.firstPayment = 'Yes'
+      if (!prev.orgName && orgName) prev.orgName = orgName
     }
   })
 
-  // ── Merge Ring data into org map ──
-  ringByOrgId.forEach((ring, orgId) => {
-    const entry = orgMap.get(orgId)
+  // ── Merge Ring data into org map (bridge app_org_id → org_id, fallback to org name) ──
+  ringByOrgId.forEach((ring, appOrgId) => {
+    // Try direct match (org_id), then app_org_id bridge, then org name
+    let entry = orgMap.get(appOrgId)
+    if (!entry) {
+      const bridgedOrgId = appOrgIdToOrgId.get(appOrgId)
+      if (bridgedOrgId) entry = orgMap.get(bridgedOrgId)
+    }
+    if (!entry && ring.orgName) {
+      const bridgedOrgId = orgNameToOrgId.get(ring.orgName.toLowerCase())
+      if (bridgedOrgId) entry = orgMap.get(bridgedOrgId)
+    }
     if (entry) {
       entry.ringSeats = ring.seats
       entry.ringStatus = ring.bucket
