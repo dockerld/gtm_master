@@ -689,6 +689,155 @@ function SAURON_activationMissing_(row) {
 
 // REMOVED: SAURON_buildPayingIndex_ — paying status now comes from canon_orgs.org_status
 
+/**
+ * Audit: compare paid seat counts between Sauron (canon_users per org) and The Ring (Stripe subscription seats).
+ * Writes a "Seat Audit" sheet with org-by-org comparison, highlighting mismatches.
+ */
+function audit_sauron_vs_ring_seats() {
+  const ss = SpreadsheetApp.getActive()
+
+  // ── Load canon_orgs ──
+  const shOrgs = ss.getSheetByName('canon_orgs')
+  if (!shOrgs) throw new Error('Missing canon_orgs sheet')
+  const orgs = SAURON_readSheetObjects_(shOrgs, 1)
+
+  // ── Load canon_users ──
+  const shUsers = ss.getSheetByName('canon_users')
+  if (!shUsers) throw new Error('Missing canon_users sheet')
+  const users = SAURON_readSheetObjects_(shUsers, 1)
+
+  // ── Load org_subscription_info (Ring source) ──
+  const shOrgSubs = ss.getSheetByName('org_subscription_info')
+  const orgSubs = shOrgSubs ? SAURON_readSheetObjects_(shOrgSubs, 1) : []
+
+  // ── Build org map from canon_orgs ──
+  const orgMap = new Map()
+  orgs.forEach(o => {
+    const orgId = String(o.org_id || '').trim()
+    if (!orgId) return
+    orgMap.set(orgId, {
+      orgId: orgId,
+      orgName: String(o.org_name || o.name || '').trim(),
+      orgStatus: String(o.org_status || '').trim(),
+      canonSeats: Number(o.seats || 0),
+      sauronUsers: 0,
+      ringSeats: 0,
+      ringStatus: '',
+      ringFirstPayment: ''
+    })
+  })
+
+  // ── Count Sauron users per org (users with valid email in canon_users) ──
+  users.forEach(u => {
+    const orgId = String(u.org_id || '').trim()
+    const email = String(u.email || u.email_key || '').trim()
+    if (!orgId || !email) return
+    const entry = orgMap.get(orgId)
+    if (entry) entry.sauronUsers += 1
+  })
+
+  // ── Get Ring seat counts from org_subscription_info ──
+  const ringByOrgId = new Map()
+  orgSubs.forEach(r => {
+    const orgId = String(r.app_org_id || r.org_id || '').trim()
+    if (!orgId) return
+
+    const status = String(r.status || '').trim().toLowerCase()
+    const hasFirstPayment = !!String(r.first_payment_at || '').trim()
+    const hasPM = String(r.has_payment_method || '').trim()
+    const hasPMBool = (hasPM === 'true' || hasPM === '1' || hasPM === 'yes')
+    const seats = Math.max(0, Number(r.quantity_total || 0))
+
+    // Ring bucket logic (same as ringBucketFromOrgSubscriptionInfo_)
+    let bucket = ''
+    if (status === 'active' && hasFirstPayment) bucket = 'Paid'
+    else if (status === 'active' && !hasFirstPayment && hasPMBool) bucket = 'Intent to Pay'
+    else if (status === 'trialing' && hasPMBool) bucket = 'Intent to Pay'
+    else if (status === 'active' && !hasFirstPayment && !hasPMBool) bucket = 'Trialing'
+    else if (status === 'trialing' && !hasPMBool) bucket = 'Trialing'
+    else bucket = 'Expired/Other'
+
+    const prev = ringByOrgId.get(orgId)
+    if (!prev) {
+      ringByOrgId.set(orgId, { seats, bucket, firstPayment: hasFirstPayment ? 'Yes' : '' })
+    } else {
+      prev.seats += seats
+      if (bucket === 'Paid') prev.bucket = 'Paid'
+      if (hasFirstPayment) prev.firstPayment = 'Yes'
+    }
+  })
+
+  // ── Merge Ring data into org map ──
+  ringByOrgId.forEach((ring, orgId) => {
+    const entry = orgMap.get(orgId)
+    if (entry) {
+      entry.ringSeats = ring.seats
+      entry.ringStatus = ring.bucket
+      entry.ringFirstPayment = ring.firstPayment
+    }
+  })
+
+  // ── Filter to orgs that are Paid in either system ──
+  const rows = []
+  orgMap.forEach(e => {
+    if (e.orgStatus === 'Paid' || e.ringStatus === 'Paid') {
+      const diff = e.ringSeats - e.sauronUsers
+      rows.push([
+        e.orgId,
+        e.orgName,
+        e.orgStatus,
+        e.ringStatus,
+        e.canonSeats,
+        e.ringSeats,
+        e.sauronUsers,
+        diff,
+        diff !== 0 ? 'MISMATCH' : ''
+      ])
+    }
+  })
+
+  // Sort by absolute diff descending
+  rows.sort((a, b) => Math.abs(b[7]) - Math.abs(a[7]))
+
+  // ── Write to sheet ──
+  const sheetName = 'Seat Audit'
+  let sh = ss.getSheetByName(sheetName)
+  if (sh) sh.clear()
+  else sh = ss.insertSheet(sheetName)
+
+  const headers = [
+    'Org ID', 'Org Name', 'Canon Status', 'Ring Status',
+    'Canon Seats', 'Ring Seats', 'Sauron Users', 'Difference (Ring - Sauron)', 'Flag'
+  ]
+
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold')
+  if (rows.length) {
+    sh.getRange(2, 1, rows.length, headers.length).setValues(rows)
+  }
+
+  // Highlight mismatches
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i][8] === 'MISMATCH') {
+      sh.getRange(i + 2, 1, 1, headers.length).setBackground('#fff2cc')
+    }
+  }
+
+  // Auto-resize
+  for (let c = 1; c <= headers.length; c++) sh.autoResizeColumn(c)
+
+  // Totals row
+  const totalRow = rows.length + 2
+  sh.getRange(totalRow, 1).setValue('TOTALS').setFontWeight('bold')
+  sh.getRange(totalRow, 6).setValue(rows.reduce((s, r) => s + r[5], 0)).setFontWeight('bold')
+  sh.getRange(totalRow, 7).setValue(rows.reduce((s, r) => s + r[6], 0)).setFontWeight('bold')
+  sh.getRange(totalRow, 8).setValue(rows.reduce((s, r) => s + r[7], 0)).setFontWeight('bold')
+
+  SpreadsheetApp.getActive().toast(
+    rows.length + ' orgs compared, ' + rows.filter(r => r[8] === 'MISMATCH').length + ' mismatches',
+    'Seat Audit', 10
+  )
+}
+
 function SAURON_buildActiveDaysIndex_(rawPosthogSheet) {
   const lastRow = rawPosthogSheet.getLastRow()
   const lastCol = rawPosthogSheet.getLastColumn()
