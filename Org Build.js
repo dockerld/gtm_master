@@ -103,6 +103,7 @@ const CANON_ORGS_CFG = {
     // CRM-derived status
     'org_status',
     'trial_ends_at',
+    'health_score',
 
     // App promo redemption rollups (PostHog promo_redemptions)
     'app_promo_codes',
@@ -159,6 +160,18 @@ function build_canon_orgs() {
       const shOrgSubInfo = ss.getSheetByName(CANON_ORGS_CFG.SHEETS.ORG_SUBSCRIPTION_INFO)
       const orgSubInfoRows = shOrgSubInfo ? readRaw_(shOrgSubInfo, 1) : { rows: [], has: () => false, col: () => -1 }
       const asOfNow = new Date()
+
+      // Health scores (keyed by email domain / account)
+      const shHealthScores = ss.getSheetByName('raw_posthog_health_scores')
+      const healthByDomain = new Map()
+      if (shHealthScores) {
+        const hsRows = readRaw_(shHealthScores, 1)
+        hsRows.rows.forEach(r => {
+          const account = orgBuildStr_(orgBuildRawGet_(hsRows, r, ['account'])).toLowerCase()
+          const score = Number(orgBuildRawGet_(hsRows, r, ['health_score']) || 0)
+          if (account) healthByDomain.set(account, score)
+        })
+      }
 
       // Optional fallback maps
       const billingMap = readOrgBillingMap_()
@@ -692,6 +705,11 @@ function build_canon_orgs() {
 
           orgStatus,
           trialEndsAt,
+          (() => {
+            const email = ownerInfo ? (ownerInfo.email || '') : ''
+            const domain = email.includes('@') ? email.split('@')[1].toLowerCase() : ''
+            return domain ? (healthByDomain.get(domain) || 0) : 0
+          })(),
 
           appPromoCodesText,
           appPromo ? appPromo.promo_codes.size : 0,
