@@ -175,7 +175,13 @@ function render_sauron_view() {
         orgById.set(orgId, o)
       })
 
-      const payingIndex = SAURON_buildPayingIndex_(shClerkUsersRaw, shMems)
+      // Paying is determined by canon_orgs.org_status (same logic as The Ring)
+      const payingOrgIds = new Set()
+      orgs.forEach(o => {
+        const orgId = String(o.org_id || '').trim()
+        const orgStatus = String(o.org_status || '').trim()
+        if (orgId && orgStatus === 'Paid') payingOrgIds.add(orgId)
+      })
       const activeDaysByEmailKey = SAURON_buildActiveDaysIndex_(shPosthogUsersRaw)
 
       // Preserve manual values from existing Sauron (per-email)
@@ -265,10 +271,7 @@ function render_sauron_view() {
           if (typeof diff === 'number' && isFinite(diff) && diff >= 0) daysSinceLastLogin = diff
         }
 
-        // ✅ Service precedence:
-        // 1) existing manual Service on Sauron (per-email, if present)
-        // 2) canon_orgs.service fallback
-        const service = SAURON_pickManualOrDefault_(priorManual, 'Service', String(org.service || '').trim())
+        const service = SAURON_pickManualOrDefault_(priorManual, 'Service', '')
 
         const dwp = Number(daysWithPing)
         const autoInOnboarding = (!isNaN(dwp) && isFinite(dwp) && dwp <= 14)
@@ -286,10 +289,7 @@ function render_sauron_view() {
         const tags = SAURON_pickManualOrDefault_(priorManual, 'Tags', '')
         const status = SAURON_pickManualOrDefault_(priorManual, 'Status', '')
 
-        const paying = SAURON_toBool_(
-          (orgId && payingIndex.byOrgId.get(orgId) === true) ||
-          payingIndex.byEmailKey.get(emailKey) === true
-        )
+        const paying = !!(orgId && payingOrgIds.has(orgId))
 
         const seats = (org.seats != null && org.seats !== '') ? org.seats : ''
         const promo = String(org.promo_code || '').trim()
@@ -687,58 +687,7 @@ function SAURON_activationMissing_(row) {
   return missing.join(', ')
 }
 
-function SAURON_buildPayingIndex_(rawClerkUsersSheet, rawClerkMembershipsSheet) {
-  const lastRow = rawClerkUsersSheet.getLastRow()
-  const lastCol = rawClerkUsersSheet.getLastColumn()
-  const byEmailKey = new Map()
-  const byOrgId = new Map()
-  if (lastRow < 2) return { byEmailKey, byOrgId }
-
-  const { map } = readHeaderMap(rawClerkUsersSheet, 1)
-  const cEmailKey = map['email_key']
-  const cStripeSub = map['stripe_subscription_id']
-  const cOrgId = map['org_id']
-
-  if (!cEmailKey || !cStripeSub) {
-    throw new Error('raw_clerk_users must have headers: email_key, stripe_subscription_id')
-  }
-
-  const data = rawClerkUsersSheet.getRange(2, 1, lastRow - 1, lastCol).getValues()
-  data.forEach(r => {
-    const emailKey = String(r[cEmailKey - 1] || '').trim()
-    const stripeSub = String(r[cStripeSub - 1] || '').trim()
-    const orgId = cOrgId ? String(r[cOrgId - 1] || '').trim() : ''
-    const hasSub = !!stripeSub
-    if (!emailKey) return
-    byEmailKey.set(emailKey, hasSub)
-    if (orgId && hasSub) byOrgId.set(orgId, true)
-  })
-
-  // If memberships are available, map org -> paying via member email_key
-  if (rawClerkMembershipsSheet) {
-    const memLastRow = rawClerkMembershipsSheet.getLastRow()
-    const memLastCol = rawClerkMembershipsSheet.getLastColumn()
-    if (memLastRow >= 2) {
-      const { map: memMap } = readHeaderMap(rawClerkMembershipsSheet, 1)
-      const cMemOrgId = memMap['org_id']
-      const cMemEmailKey = memMap['email_key']
-      const cMemEmail = memMap['email']
-      if (cMemOrgId && (cMemEmailKey || cMemEmail)) {
-        const memData = rawClerkMembershipsSheet.getRange(2, 1, memLastRow - 1, memLastCol).getValues()
-        memData.forEach(r => {
-          const orgId = String(r[cMemOrgId - 1] || '').trim()
-          if (!orgId) return
-          let emailKey = ''
-          if (cMemEmailKey) emailKey = String(r[cMemEmailKey - 1] || '').trim()
-          if (!emailKey && cMemEmail) emailKey = SAURON_normEmail_(String(r[cMemEmail - 1] || '').trim())
-          if (!emailKey) return
-          if (byEmailKey.get(emailKey) === true) byOrgId.set(orgId, true)
-        })
-      }
-    }
-  }
-
-  return { byEmailKey, byOrgId }
+// REMOVED: SAURON_buildPayingIndex_ — paying status now comes from canon_orgs.org_status
 }
 
 function SAURON_buildActiveDaysIndex_(rawPosthogSheet) {
