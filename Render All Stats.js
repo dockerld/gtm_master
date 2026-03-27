@@ -1550,13 +1550,13 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
         'Sign up to paid conversion',
         data.conversion.signupToPaidRate,
         data.conversion.paidUs + ' / ' + data.conversion.signupResolved,
-        data.conversion.signupTrialPotential + ' still trialing | ' + data.conversion.totalSignedUp + ' total signups'
+        data.conversion.signupTrialPotential + ' still trialing (' + ALLSTATS_fmtPct_(data.conversion.signupPotentialMaxRate) + ' max) | ' + data.conversion.totalSignedUp + ' total signups'
       ],
       [
         'Promo trial to paid conversion',
         data.conversion.promoToPaidRate,
         data.conversion.promoToPaid + ' / ' + data.conversion.promoResolved,
-        data.conversion.promoTrialPotential + ' still trialing | ' + data.conversion.promoPool + ' total promo signups'
+        data.conversion.promoTrialPotential + ' still trialing (' + ALLSTATS_fmtPct_(data.conversion.promoPotentialMaxRate) + ' max) | ' + data.conversion.promoPool + ' total promo signups'
       ],
       ['NRR (latest snapshot)', data.retention.nrr, data.retention.latest_snapshot || '', ''],
       ['GRR (latest snapshot)', data.retention.grr, data.retention.latest_snapshot || '', ''],
