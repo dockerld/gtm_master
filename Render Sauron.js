@@ -688,7 +688,6 @@ function SAURON_activationMissing_(row) {
 }
 
 // REMOVED: SAURON_buildPayingIndex_ — paying status now comes from canon_orgs.org_status
-}
 
 function SAURON_buildActiveDaysIndex_(rawPosthogSheet) {
   const lastRow = rawPosthogSheet.getLastRow()
