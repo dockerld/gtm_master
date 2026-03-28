@@ -43,6 +43,7 @@ const NOTION_COMPANY_PROP_FIRM_SIZE = "Firm Size"
 const NOTION_COMPANY_PROP_LAST_SYNCED = "Last Synced At"
 const NOTION_COMPANY_PROP_PIPELINE_STAGE = "Pipeline Stage"
 const NOTION_COMPANY_PROP_TRIAL_END_DATE = "Trial End Date"
+const NOTION_COMPANY_PROP_HEALTH_SCORE = "Health Score"
 
 // Notion Contact properties
 const NOTION_CONTACT_PROP_NAME = "Name"
@@ -434,6 +435,7 @@ function sync_orgs_to_notion() {
     const ownerEmail = str_(org.owner_email)
     const domain = getDomain_(ownerEmail)
     const trialEndDate = parseDateOnly_(org.trial_ends_at)
+    const healthScore = Number(org.health_score) || 0
 
     // Dedup: if a company exists with this domain but no org_id, link it instead
     if (domain && !CRM_PERSONAL_DOMAINS.has(domain) && existingByDomain.has(domain)) {
@@ -449,6 +451,7 @@ function sync_orgs_to_notion() {
           [NOTION_COMPANY_PROP_FIRM_SIZE]: { select: { name: firmSize } },
           [NOTION_COMPANY_PROP_IS_PAYING]: { checkbox: isPaying },
           [NOTION_COMPANY_PROP_LAST_SYNCED]: { date: { start: nowIso } },
+          [NOTION_COMPANY_PROP_HEALTH_SCORE]: { number: healthScore },
           ...(trialEndDate ? { [NOTION_COMPANY_PROP_TRIAL_END_DATE]: { date: { start: trialEndDate } } } : {})
         }})
         Logger.log(`  DOMAIN-LINKED: "${orgName}" (${orgId}) → existing company by domain ${domain}`)
@@ -467,6 +470,7 @@ function sync_orgs_to_notion() {
       [NOTION_COMPANY_PROP_PAID_SEATS]: { number: seats },
       [NOTION_COMPANY_PROP_FIRM_SIZE]: { select: { name: firmSize } },
       [NOTION_COMPANY_PROP_IS_PAYING]: { checkbox: isPaying },
+      [NOTION_COMPANY_PROP_HEALTH_SCORE]: { number: healthScore },
       [NOTION_COMPANY_PROP_LAST_SYNCED]: { date: { start: nowIso } }
     }
     if (subStatus) {
@@ -523,6 +527,7 @@ function sync_orgs_to_notion() {
     const ownerEmail = str_(org.owner_email)
     const domain = getDomain_(ownerEmail)
     const trialEndDate = parseDateOnly_(org.trial_ends_at)
+    const healthScore = Number(org.health_score) || 0
     const sheetFirmSize = seatsToFirmSize_(seats)
     const companyName = notionGetTitleAny_(company) || orgId
 
@@ -534,6 +539,7 @@ function sync_orgs_to_notion() {
     const curDomain = notionGetRichText_(company, NOTION_COMPANY_PROP_DOMAIN)
     const curPipeline = notionGetSelect_(company, NOTION_COMPANY_PROP_PIPELINE_STAGE)
     const curTrialEnd = (company.properties && company.properties[NOTION_COMPANY_PROP_TRIAL_END_DATE] && company.properties[NOTION_COMPANY_PROP_TRIAL_END_DATE].date && company.properties[NOTION_COMPANY_PROP_TRIAL_END_DATE].date.start) || ""
+    const curHealthScore = (company.properties && company.properties[NOTION_COMPANY_PROP_HEALTH_SCORE] && company.properties[NOTION_COMPANY_PROP_HEALTH_SCORE].number) || 0
 
     // Check if anything actually changed
     const seatsChanged = curSeats !== seats
@@ -543,8 +549,9 @@ function sync_orgs_to_notion() {
     const domainChanged = domain && !CRM_PERSONAL_DOMAINS.has(domain) && curDomain.toLowerCase() !== domain.toLowerCase()
     const pipelineChanged = isPaying && curPipeline.toLowerCase() !== "closed won"
     const trialEndChanged = trialEndDate && curTrialEnd !== trialEndDate
+    const healthScoreChanged = curHealthScore !== healthScore
 
-    if (!seatsChanged && !payingChanged && !statusChanged && !firmSizeChanged && !domainChanged && !pipelineChanged && !trialEndChanged) {
+    if (!seatsChanged && !payingChanged && !statusChanged && !firmSizeChanged && !domainChanged && !pipelineChanged && !trialEndChanged && !healthScoreChanged) {
       skipped++
       continue
     }
@@ -573,6 +580,9 @@ function sync_orgs_to_notion() {
     if (trialEndChanged) {
       patch[NOTION_COMPANY_PROP_TRIAL_END_DATE] = { date: { start: trialEndDate } }
     }
+    if (healthScoreChanged) {
+      patch[NOTION_COMPANY_PROP_HEALTH_SCORE] = { number: healthScore }
+    }
 
     const changes = []
     if (seatsChanged) changes.push(`seats: ${curSeats}→${seats}`)
@@ -582,6 +592,7 @@ function sync_orgs_to_notion() {
     if (domainChanged) changes.push(`domain: ${curDomain}→${domain}`)
     if (pipelineChanged) changes.push(`pipeline: ${curPipeline}→Closed Won`)
     if (trialEndChanged) changes.push(`trialEnd: ${curTrialEnd}→${trialEndDate}`)
+    if (healthScoreChanged) changes.push(`healthScore: ${curHealthScore}→${healthScore}`)
 
     notionUpdatePage_(notion, company.id, { properties: patch })
     Logger.log(`  SYNCED: "${companyName}" — ${changes.join(", ")}`)
