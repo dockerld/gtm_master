@@ -14,7 +14,7 @@ const RING_WEEKLY_CFG = {
     'camden@pingassistant.com',
     'chad@pingassistant.com',
     'ben@pingassistant.com',
-    'david@pingassistant.com'
+    'carson@pingassistant.com'
   ],
 
   SUBJECT: 'The Ring Weekly'
@@ -147,7 +147,7 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
               </div>
               <div style="text-align:right;font-size:12px;opacity:0.7;white-space:nowrap;">
                 <div style="font-weight:800;">Monthly goal: ${escapeHtml_(monthlyGoalValue)}</div>
-                <div style="font-weight:800;">Quota: ${escapeHtml_(monthlyQuotaValue)}</div>
+                <div style="font-weight:800;">Quota: ${escapeHtml_(fmtPct_(quotaPctOfGoal))}</div>
                 <div>${escapeHtml_(monthlyGoalPctText)} to goal</div>
               </div>
             </div>
