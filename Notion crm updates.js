@@ -500,6 +500,11 @@ function sync_orgs_to_notion() {
       createOwnerContactIfNeeded_(notion, contactsDbId, companyPage.id, org, orgId, nowIso)
     }
 
+    // PDL enrichment (only when domain is set)
+    if (companyPage && companyPage.id && domain && !CRM_PERSONAL_DOMAINS.has(domain)) {
+      enrichWithPdl_(companyPage.id)
+    }
+
     Logger.log(`  CREATED: "${orgName}" (${orgId}) — seats=${seats}, paying=${isPaying}, status=${subStatus || "none"}`)
     created++
     if (created % 50 === 0) Utilities.sleep(100)
@@ -1147,5 +1152,36 @@ function tryUpgradeNotionContactTitle_(notion, contactId, desiredName) {
         title: [{ type: "text", text: { content: name } }]
       }
     }})
+  }
+}
+
+/**
+ * Call PDL enrichment webhook for a newly created Notion company page.
+ * Requires WEBHOOK_SECRET in Script Properties.
+ */
+function enrichWithPdl_(notionPageId) {
+  const secret = PropertiesService.getScriptProperties().getProperty('WEBHOOK_SECRET')
+  if (!secret) {
+    Logger.log('enrichWithPdl_: WEBHOOK_SECRET not set, skipping')
+    return
+  }
+  try {
+    const res = UrlFetchApp.fetch('https://pingdomsteward-production.up.railway.app/admin/enrich/pdl', {
+      method: 'post',
+      contentType: 'application/json',
+      headers: { 'x-webhook-secret': secret },
+      payload: JSON.stringify({ pageId: notionPageId }),
+      muteHttpExceptions: true
+    })
+    const code = res.getResponseCode()
+    if (code === 200) {
+      Logger.log(`  PDL enriched: ${notionPageId}`)
+    } else if (code === 404) {
+      Logger.log(`  PDL no match: ${notionPageId}`)
+    } else {
+      Logger.log(`  PDL error ${code}: ${notionPageId}`)
+    }
+  } catch (e) {
+    Logger.log(`  PDL fetch failed: ${e.message}`)
   }
 }
