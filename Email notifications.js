@@ -14,7 +14,7 @@ const RING_WEEKLY_CFG = {
     'camden@pingassistant.com',
     'chad@pingassistant.com',
     'ben@pingassistant.com',
-    'david@pingassistant.com'
+    'carson@pingassistant.com'
   ],
 
   SUBJECT: 'The Ring Weekly'
@@ -22,10 +22,6 @@ const RING_WEEKLY_CFG = {
 
 function send_ring_weekly_email() {
   return send_ring_weekly_email_to_(RING_WEEKLY_CFG.RECIPIENTS)
-}
-
-function send_ring_weekly_email_test_docker() {
-  return send_ring_weekly_email_to_(['docker@pingassistant.com'])
 }
 
 function send_ring_weekly_email_to_(recipients) {
@@ -151,7 +147,7 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
               </div>
               <div style="text-align:right;font-size:12px;opacity:0.7;white-space:nowrap;">
                 <div style="font-weight:800;">Monthly goal: ${escapeHtml_(monthlyGoalValue)}</div>
-                <div style="font-weight:800;">Quota: ${escapeHtml_(monthlyQuotaValue)}</div>
+                <div style="font-weight:800;">Quota: ${escapeHtml_(fmtPct_(quotaPctOfGoal))}</div>
                 <div>${escapeHtml_(monthlyGoalPctText)} to goal</div>
               </div>
             </div>
@@ -221,8 +217,8 @@ function buildRingWeeklyHtml_(arr, subs, seats) {
 
 /* =========================
  * Goals reader:
- * - Goal section: month headers in row 12, ARR values in row 13
- * - Quota section: month headers in row 6, ARR values in row 7
+ * - Goal section: month headers in row 6, ARR values in row 7
+ * - Quota section: month headers in row 12, ARR values in row 13
  * - Legacy fallback: row 1/2
  * ========================= */
 
@@ -241,9 +237,9 @@ function getMonthlyGoalAndQuotaFromGoalsSheet_() {
   const tz = Session.getScriptTimeZone()
   const thisMonthKey = Utilities.formatDate(new Date(), tz, 'MMM-yyyy') // "Dec-2025"
 
-  // New layout: Goal section (rows 12/13), Quota section (rows 6/7)
-  let goalArr = findMonthValueInRowPair_(sh, 12, 13, thisMonthKey)
-  const quotaArr = findMonthValueInRowPair_(sh, 6, 7, thisMonthKey)
+  // Goal section: rows 6/7, Quota section: rows 12/13
+  let goalArr = findMonthValueInRowPair_(sh, 6, 7, thisMonthKey)
+  const quotaArr = findMonthValueInRowPair_(sh, 12, 13, thisMonthKey)
 
   // Legacy fallback (rows 1/2) for older sheets
   if (!(goalArr > 0)) {
@@ -251,8 +247,8 @@ function getMonthlyGoalAndQuotaFromGoalsSheet_() {
   }
 
   if (!(goalArr > 0)) {
-    // Last-resort fallback: latest positive value from Goal ARR row (row 13)
-    const goalRow = sh.getRange(13, 1, 1, lastCol).getValues()[0]
+    // Last-resort fallback: latest positive value from Goal ARR row (row 7)
+    const goalRow = sh.getRange(7, 1, 1, lastCol).getValues()[0]
     goalArr = findLatestPositive_(goalRow)
   }
 

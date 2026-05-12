@@ -102,8 +102,13 @@ function stripe_pull_subscriptions_to_raw() {
     'promo_code',
     'promo_code_all',
 
+    'trial_start',
+    'trial_end',
+
     'cancel_at_period_end',
     'canceled_at',
+    'current_period_end',
+    'cancellation_reason',
 
     'metadata_json',
     'metadata_exclude_from_ring',
@@ -201,7 +206,17 @@ function stripe_pull_subscriptions_to_raw() {
 
   const rows = subs.map(sub => {
     const subId = strOrBlank_(sub.id)
-    const firstPaymentAt = firstPaidBySubId.get(subId) || ''
+    let firstPaymentAt = firstPaidBySubId.get(subId) || ''
+
+    // Fallback: if no paid invoice found but sub is active and trial has ended,
+    // use trial_end as proxy for first_payment_at (covers manual invoices not
+    // linked to the subscription)
+    if (!firstPaymentAt && sub.status === 'active' && sub.trial_end) {
+      const trialEndSec = Number(sub.trial_end)
+      if (isFinite(trialEndSec) && trialEndSec > 0 && trialEndSec * 1000 < Date.now()) {
+        firstPaymentAt = stripeUnixToIso_(trialEndSec)
+      }
+    }
 
     // amounts / quantities (sum of items)
     let totalCents = 0
@@ -473,6 +488,24 @@ function stripe_pull_subscriptions_to_raw() {
     const md = sub.metadata || {}
     const mdExclude = strOrBlank_(md[STRIPE_EXCLUDE_META_KEY])
     const metadataJson = stripeSafeJson_(md)
+    const cancelDetails = (sub && sub.cancellation_details) ? sub.cancellation_details : {}
+    const cancelFeedback = strOrBlank_(cancelDetails.feedback).toLowerCase()
+    const cancelReasonRaw = strOrBlank_(cancelDetails.reason).toLowerCase()
+    const cancelComment = strOrBlank_(cancelDetails.comment)
+    const cancelReasonMap = {
+      switched_service: 'I found an alternative',
+      too_expensive: 'Too expensive',
+      unused: 'I no longer need it',
+      missing_features: 'Missing features',
+      customer_service: 'Customer service',
+      low_quality: 'Low quality',
+      too_complex: 'Too complex',
+      other: 'Other'
+    }
+    let cancellationReason = cancelReasonMap[cancelFeedback] || cancelReasonMap[cancelReasonRaw] || ''
+    if (!cancellationReason && cancelFeedback) cancellationReason = cancelFeedback.replace(/_/g, ' ')
+    if (!cancellationReason && cancelReasonRaw) cancellationReason = cancelReasonRaw.replace(/_/g, ' ')
+    if (!cancellationReason && cancelComment) cancellationReason = cancelComment
 
     return [
       subId,
@@ -520,8 +553,13 @@ function stripe_pull_subscriptions_to_raw() {
       promoCode,
       promoCodeAll.join(', '),
 
+      stripeUnixToIso_(sub.trial_start),
+      stripeUnixToIso_(sub.trial_end),
+
       sub.cancel_at_period_end === true,
       stripeUnixToIso_(sub.canceled_at),
+      stripeUnixToIso_(sub.current_period_end),
+      cancellationReason,
 
       metadataJson,
       mdExclude,
@@ -793,84 +831,61 @@ function stripeDiscountDedupeKey_(discount) {
   return `coupon:${couponId}|promo:${promoId}|start:${start}|end:${end}`
 }
 
-function stripeFetchCouponsMap_(apiKey, couponIds) {
+/**
+ * Shared helper: parallel-fetch a list of Stripe objects by ID.
+ * Uses UrlFetchApp.fetchAll in chunks of 100 (GAS concurrent limit ~200, safe at 100).
+ * Each response is handled individually so one bad ID doesn't abort the batch.
+ */
+function stripeFetchObjectsMapParallel_(apiKey, ids, resourcePath, label, idFilter) {
   const map = {}
-  if (!couponIds || !couponIds.length) return map
+  if (!ids || !ids.length) return map
 
-  couponIds.forEach(id => {
-    const url = `${STRIPE_RAW_CFG.API_BASE}/coupons/${encodeURIComponent(id)}`
-    const res = UrlFetchApp.fetch(url, {
+  const CHUNK = 100
+  const filtered = idFilter ? ids.filter(idFilter) : ids.filter(Boolean)
+
+  for (let i = 0; i < filtered.length; i += CHUNK) {
+    const chunk = filtered.slice(i, i + CHUNK)
+    const requests = chunk.map(id => ({
+      url: `${STRIPE_RAW_CFG.API_BASE}/${resourcePath}/${encodeURIComponent(id)}`,
       method: 'get',
       headers: { Authorization: `Bearer ${apiKey}` },
       muteHttpExceptions: true
+    }))
+
+    const responses = UrlFetchApp.fetchAll(requests)
+    responses.forEach((res, idx) => {
+      const id = chunk[idx]
+      const code = res.getResponseCode()
+      if (code >= 300) {
+        Logger.log(`Warning: failed to fetch ${label} ${id}: ${res.getContentText()}`)
+        return
+      }
+      try {
+        map[id] = JSON.parse(res.getContentText())
+      } catch (e) {
+        Logger.log(`Warning: parse failure for ${label} ${id}: ${e}`)
+      }
     })
 
-    const code = res.getResponseCode()
-    if (code >= 300) {
-      Logger.log(`Warning: failed to fetch coupon ${id}: ${res.getContentText()}`)
-      return
-    }
+    // Small pause between chunks to avoid tripping Stripe rate limit / GAS "invoked too many times"
+    if (i + CHUNK < filtered.length) Utilities.sleep(300)
+  }
 
-    map[id] = JSON.parse(res.getContentText())
-    Utilities.sleep(100)
-  })
-
-  Logger.log(`Fetched ${Object.keys(map).length} coupons`)
+  Logger.log(`Fetched ${Object.keys(map).length} ${label}s`)
   return map
+}
+
+function stripeFetchCouponsMap_(apiKey, couponIds) {
+  return stripeFetchObjectsMapParallel_(apiKey, couponIds, 'coupons', 'coupon')
 }
 
 function stripeFetchPromotionCodesMap_(apiKey, promoIds) {
-  const map = {}
-  if (!promoIds || !promoIds.length) return map
-
-  promoIds.forEach(id => {
-    const url = `${STRIPE_RAW_CFG.API_BASE}/promotion_codes/${encodeURIComponent(id)}`
-    const res = UrlFetchApp.fetch(url, {
-      method: 'get',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      muteHttpExceptions: true
-    })
-
-    const code = res.getResponseCode()
-    if (code >= 300) {
-      Logger.log(`Warning: failed to fetch promotion_code ${id}: ${res.getContentText()}`)
-      return
-    }
-
-    map[id] = JSON.parse(res.getContentText())
-    Utilities.sleep(100)
-  })
-
-  Logger.log(`Fetched ${Object.keys(map).length} promotion codes`)
-  return map
+  return stripeFetchObjectsMapParallel_(apiKey, promoIds, 'promotion_codes', 'promotion_code')
 }
 
 function stripeFetchPaymentMethodsMap_(apiKey, pmIds) {
-  const map = {}
-  if (!pmIds || !pmIds.length) return map
-
-  pmIds.forEach(id => {
-    if (!/^pm_/.test(String(id || ''))) return
-
-    const url = `${STRIPE_RAW_CFG.API_BASE}/payment_methods/${encodeURIComponent(id)}`
-    const res = UrlFetchApp.fetch(url, {
-      method: 'get',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      muteHttpExceptions: true
-    })
-
-    const code = res.getResponseCode()
-    if (code >= 300) {
-      Logger.log(`Warning: failed to fetch payment_method ${id}: ${res.getContentText()}`)
-      return
-    }
-
-    map[id] = JSON.parse(res.getContentText())
-    Utilities.sleep(100)
-  })
-
-  Logger.log(`Fetched ${Object.keys(map).length} payment methods`)
-  return map
+  return stripeFetchObjectsMapParallel_(apiKey, pmIds, 'payment_methods', 'payment_method',
+    id => /^pm_/.test(String(id || '')))
 }
 
 function stripeUnixToIso_(sec) {
@@ -1037,30 +1052,7 @@ function stripeSerializeDiscountDetails_(discountsArr, couponMap, promoMap, curr
  * Batch-fetch product objects by ID (for product names).
  */
 function stripeFetchProductsMap_(apiKey, productIds) {
-  const map = {}
-  if (!productIds || !productIds.length) return map
-
-  productIds.forEach(id => {
-    if (!id) return
-    const url = `${STRIPE_RAW_CFG.API_BASE}/products/${encodeURIComponent(id)}`
-    const res = UrlFetchApp.fetch(url, {
-      method: 'get',
-      headers: { Authorization: `Bearer ${apiKey}` },
-      muteHttpExceptions: true
-    })
-
-    const code = res.getResponseCode()
-    if (code >= 300) {
-      Logger.log(`Warning: failed to fetch product ${id}: ${res.getContentText()}`)
-      return
-    }
-
-    map[id] = JSON.parse(res.getContentText())
-    Utilities.sleep(100)
-  })
-
-  Logger.log(`Fetched ${Object.keys(map).length} products`)
-  return map
+  return stripeFetchObjectsMapParallel_(apiKey, productIds, 'products', 'product')
 }
 
 /* =========================

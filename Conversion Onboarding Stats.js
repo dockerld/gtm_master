@@ -36,7 +36,7 @@ function COMBINED_renderConversionOnboarding_(opts) {
 
   const tz = Session.getScriptTimeZone()
 
-  const statsByMonth = CONV_collectStatsByMonth_(shOrgs, shArrRaw, tz)
+  const statsByMonth = CONV_collectStatsByMonth_(shOrgs, shArrRaw, tz, ss)
   const convRows = CONV_buildRows_(statsByMonth)
 
   const createdByEmailKey = ONB_buildCreatedAtIndex_(shClerk)

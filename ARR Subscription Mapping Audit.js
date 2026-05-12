@@ -38,7 +38,7 @@ function render_arr_subscription_mapping_audit() {
     const orgNameById = new Map()
     ;(canonOrgs || []).forEach(o => {
       const appId = ARRMAP_str_(o.app_org_id)
-      const clerkId = ARRMAP_str_(o.clerk_org_id || o.org_id)
+      const clerkId = ARRMAP_str_(o.org_id)
       const id = appId || clerkId
       if (!id && !clerkId) return
       const name = ARRMAP_str_(o.org_name || o.org_slug || o.org)
@@ -92,16 +92,19 @@ function render_arr_subscription_mapping_audit() {
       })
     })
 
+    const stripeBySubId = new Map()
+    ;(stripeRows || []).forEach(r => {
+      const sid = ARRMAP_str_(r.stripe_subscription_id || r.subscription_id || r.subscription || r.id)
+      if (sid) stripeBySubId.set(sid, r)
+    })
+
     const multiOrgRows = []
     activeSubIdsByOrgId.forEach((subSet, orgId) => {
       if ((subSet || new Set()).size <= 1) return
       const ids = Array.from(subSet)
       let arrSum = 0
       ids.forEach(id => {
-        const row = stripeRows.find(r => {
-          const sid = ARRMAP_str_(r.stripe_subscription_id || r.subscription_id || r.subscription || r.id)
-          return sid === id
-        })
+        const row = stripeBySubId.get(id)
         if (row) arrSum += ARRMAP_listArr_(row)
       })
 
@@ -181,7 +184,7 @@ function ARRMAP_buildOrgIdsBySubIdFromCanon_(canonOrgs) {
   const out = new Map()
   ;(canonOrgs || []).forEach(r => {
     const appOrgId = ARRMAP_str_(r.app_org_id)
-    const clerkOrgId = ARRMAP_str_(r.clerk_org_id || r.org_id)
+    const clerkOrgId = ARRMAP_str_(r.org_id)
     const orgId = appOrgId || clerkOrgId
     if (!orgId) return
     const subIds = ARRMAP_csvList_(r.stripe_subscription_ids)
@@ -219,7 +222,8 @@ function ARRMAP_internalExcludedSubIds_(sheet) {
   const rows = ARRMAP_readSheetObjects_(sheet, 1)
   ;(rows || []).forEach(r => {
     const reason = ARRMAP_str_(r.exclude_reason).toLowerCase()
-    if (reason !== 'internal') return
+    const ARRMAP_EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!ARRMAP_EXCLUDE_REASONS.has(reason)) return
     const subId =
       ARRMAP_str_(r.subscription_id) ||
       ARRMAP_str_(r.stripe_subscription_id) ||

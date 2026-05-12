@@ -20,8 +20,8 @@
  *
  * Rules:
  * - KPI classification considers active + trialing subscriptions
- * - Exclude subscriptions listed in Manual Stripe Changes only when
- *   exclude_reason == "internal" (case-insensitive exact match)
+ * - Exclude subscriptions listed in Manual Stripe Changes when
+ *   exclude_reason is "internal", "partner", or "free subscription"
  * - Display status labels:
  *     paid bucket -> "Paid"
  *     intent bucket -> "Intent to Pay"
@@ -278,6 +278,8 @@ function render_ring_view() {
         const signUpMs = signUpDate instanceof Date ? signUpDate.getTime() : 0
 
         const trialEndIso =
+          str_((canonMatch && canonMatch.trialEndsAt) || '') ||
+          str_((canonByResolvedOrg && canonByResolvedOrg.trialEndsAt) || '') ||
           str_(orgSubInfo && (orgSubInfo.trial_ends_at || orgSubInfo.current_period_end)) ||
           str_(r.current_period_end) ||
           ''
@@ -384,21 +386,22 @@ function buildRingCanonIndex_(canonRows) {
 
   for (const r of (canonRows || [])) {
     const appOrgId = str_(r.app_org_id)
-    const clerkOrgId = str_(r.clerk_org_id || r.org_id)
+    const clerkOrgId = str_(r.org_id)
     const orgId = appOrgId || clerkOrgId
     if (!orgId && !clerkOrgId) continue
 
     const orgName = str_(r.org_name || r.org_slug)
     const billingEmail = str_(r.billing_email)
     const orgCreatedAt = str_(r.org_created_at || r.created_at)
-    if (orgId) byOrgId.set(orgId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail, orgCreatedAt })
-    if (clerkOrgId) byClerkOrgId.set(clerkOrgId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail, orgCreatedAt })
+    const trialEndsAt = str_(r.trial_ends_at)
+    if (orgId) byOrgId.set(orgId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail, orgCreatedAt, trialEndsAt })
+    if (clerkOrgId) byClerkOrgId.set(clerkOrgId, { orgId, appOrgId, clerkOrgId, orgName, billingEmail, orgCreatedAt, trialEndsAt })
 
     const subIds = ringCsvList_(r.stripe_subscription_ids)
     subIds.forEach(subId => {
       const s = str_(subId)
       if (!s || bySubId.has(s)) return
-      bySubId.set(s, { orgId, appOrgId, clerkOrgId, orgName, billingEmail, orgCreatedAt })
+      bySubId.set(s, { orgId, appOrgId, clerkOrgId, orgName, billingEmail, orgCreatedAt, trialEndsAt })
     })
   }
 
@@ -971,7 +974,8 @@ function buildManualStripeChangesBySubId_(sheet) {
     if (!subId) continue
 
     const excludeReason = str_(r.exclude_reason).toLowerCase()
-    if (excludeReason !== 'internal') continue
+    const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!EXCLUDE_REASONS.has(excludeReason)) continue
     out.set(subId, { excludeInternal: true })
   }
 

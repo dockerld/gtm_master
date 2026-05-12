@@ -87,25 +87,16 @@ function build_canon_users() {
           'pm_financial_cents_first_connected_date',
 
           // manual overrides
-          'service_override',
-          'white_glove_override',
-          'in_onboarding_override',
           'tags_override',
           'note_override',
 
           // derived effective values
-          'service_effective',
-          'white_glove_effective',
-          'in_onboarding_effective',
           'tags_effective',
 
           'updated_at'
         ],
 
         MANUAL_FIELDS: new Set([
-          'service_override',
-          'white_glove_override',
-          'in_onboarding_override',
           'tags_override',
           'note_override'
         ])
@@ -518,9 +509,6 @@ function build_canon_users() {
         if (!headerMap['email_key']) return {}
 
         const cEmailKey = headerMap['email_key'] - 1
-        const cService = headerMap['service_override'] ? headerMap['service_override'] - 1 : null
-        const cWG = headerMap['white_glove_override'] ? headerMap['white_glove_override'] - 1 : null
-        const cOnb = headerMap['in_onboarding_override'] ? headerMap['in_onboarding_override'] - 1 : null
         const cTags = headerMap['tags_override'] ? headerMap['tags_override'] - 1 : null
         const cNote = headerMap['note_override'] ? headerMap['note_override'] - 1 : null
 
@@ -531,9 +519,6 @@ function build_canon_users() {
           const emailKey = normalizeEmailSafe_(String(r[cEmailKey] || ''))
           if (!emailKey) return
           out[emailKey] = {
-            service_override: cService != null ? String(r[cService] || '').trim() : '',
-            white_glove_override: cWG != null ? r[cWG] === true : false,
-            in_onboarding_override: cOnb != null ? r[cOnb] === true : false,
             tags_override: cTags != null ? String(r[cTags] || '').trim() : '',
             note_override: cNote != null ? String(r[cNote] || '').trim() : ''
           }
@@ -560,7 +545,6 @@ function build_canon_users() {
         sheet.getRange(1, 1, 1, headers.length).setValues([headers])
         sheet.setFrozenRows(1)
         if (rows && rows.length) batchSetValuesSafe_(sheet, 2, 1, rows, 5000)
-        sheet.autoResizeColumns(1, headers.length)
       }
 
       // ---------- Build indices ----------
@@ -579,29 +563,70 @@ function build_canon_users() {
       const out = []
       const rowsIn = users.rows.length
 
+      // Precompute column indices once (-1 if absent) to avoid per-row map lookups.
+      const colOrNeg1_ = (h) => users.has(h) ? users.col(h) : -1
+      const COL = {
+        clerk_user_id: colOrNeg1_('clerk_user_id'),
+        user_id: colOrNeg1_('user_id'),
+        email: colOrNeg1_('email'),
+        email_key: colOrNeg1_('email_key'),
+        name: colOrNeg1_('name'),
+        full_name: colOrNeg1_('full_name'),
+        first_name: colOrNeg1_('first_name'),
+        last_name: colOrNeg1_('last_name'),
+        created_at: colOrNeg1_('created_at')
+      }
+
+      // Resolve last-login column once (same priority + fuzzy rules as pickLastLoginFromClerkUsersRow_)
+      const LAST_LOGIN_COL = (() => {
+        const candidates = [
+          'last_login_date',
+          'last_sign_in_at',
+          'last_sign_in_date',
+          'last_login_at',
+          'last_active_at',
+          'last_seen_at'
+        ]
+        for (const h of candidates) {
+          if (users.has(h)) return users.col(h)
+        }
+        const keys = Object.keys(users.map || {})
+        const fuzzy = keys.find(k => {
+          const kk = String(k || '').toLowerCase()
+          const hasLast = kk.includes('last')
+          const hasSignal =
+            kk.includes('login') ||
+            (kk.includes('sign') && kk.includes('in')) ||
+            kk.includes('active') ||
+            kk.includes('seen')
+          return hasLast && hasSignal
+        })
+        return (fuzzy && users.map[fuzzy]) ? users.map[fuzzy] - 1 : -1
+      })()
+
       users.rows.forEach(r => {
         const clerkUserId =
-          users.has('clerk_user_id') ? String(r[users.col('clerk_user_id')] || '').trim() :
-          users.has('user_id') ? String(r[users.col('user_id')] || '').trim() :
+          COL.clerk_user_id >= 0 ? String(r[COL.clerk_user_id] || '').trim() :
+          COL.user_id >= 0 ? String(r[COL.user_id] || '').trim() :
           ''
 
-        const email = users.has('email') ? String(r[users.col('email')] || '').trim() : ''
+        const email = COL.email >= 0 ? String(r[COL.email] || '').trim() : ''
         const emailKey =
-          users.has('email_key') ? normalizeEmailSafe_(String(r[users.col('email_key')] || '')) :
+          COL.email_key >= 0 ? normalizeEmailSafe_(String(r[COL.email_key] || '')) :
           normalizeEmailSafe_(email)
 
         if (!emailKey) return
 
         const name =
-          users.has('name') ? String(r[users.col('name')] || '').trim() :
-          users.has('full_name') ? String(r[users.col('full_name')] || '').trim() :
+          COL.name >= 0 ? String(r[COL.name] || '').trim() :
+          COL.full_name >= 0 ? String(r[COL.full_name] || '').trim() :
           (() => {
-            const first = users.has('first_name') ? String(r[users.col('first_name')] || '').trim() : ''
-            const last = users.has('last_name') ? String(r[users.col('last_name')] || '').trim() : ''
+            const first = COL.first_name >= 0 ? String(r[COL.first_name] || '').trim() : ''
+            const last = COL.last_name >= 0 ? String(r[COL.last_name] || '').trim() : ''
             return `${first} ${last}`.trim()
           })()
 
-        const createdAtRaw = users.has('created_at') ? r[users.col('created_at')] : ''
+        const createdAtRaw = COL.created_at >= 0 ? r[COL.created_at] : ''
 
         const mem =
           (clerkUserId && membershipIdx.byUserId.has(clerkUserId)) ? membershipIdx.byUserId.get(clerkUserId) :
@@ -611,7 +636,7 @@ function build_canon_users() {
         const login = loginRollups.get(emailKey) || emptyLogin_()
 
         // ✅ Truth: last login comes from raw_clerk_users row (handles Date objects + ISO strings)
-        const lastLoginFromClerk = pickLastLoginFromClerkUsersRow_(users, r)
+        const lastLoginFromClerk = LAST_LOGIN_COL >= 0 ? asYMD_(r[LAST_LOGIN_COL]) : ''
         const lastLoginYMD = lastLoginFromClerk || login.last_login_date || ''
 
         const daysWithPing = computeDaysWithPing_(createdAtRaw, todayStr)
@@ -620,16 +645,10 @@ function build_canon_users() {
         const daysSinceLastLogin = lastLoginYMD ? daysBetweenYMD_(lastLoginYMD, todayStr) : ''
 
         const manual = existingManual[emailKey] || {
-          service_override: '',
-          white_glove_override: false,
-          in_onboarding_override: false,
           tags_override: '',
           note_override: ''
         }
 
-        const serviceEff = manual.service_override || ''
-        const whiteGloveEff = manual.white_glove_override === true
-        const inOnbEff = manual.in_onboarding_override === true
         const tagsEff = manual.tags_override || ''
 
         out.push([
@@ -670,15 +689,9 @@ function build_canon_users() {
           m.pm_financial_cents_connected,
           m.pm_financial_cents_first_connected_date,
 
-          manual.service_override,
-          manual.white_glove_override === true,
-          manual.in_onboarding_override === true,
           manual.tags_override,
           manual.note_override,
 
-          serviceEff,
-          whiteGloveEff,
-          inOnbEff,
           tagsEff,
 
           today

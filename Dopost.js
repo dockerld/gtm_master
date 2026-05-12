@@ -5,9 +5,8 @@
  * - Validates shared secret (query param ?secret=... OR JSON body.secret)
  * - Logs EVERYTHING into webhook_inbox (including full payload, clipped)
  * - Runs the pipeline immediately (no queue):
- *    1) calcrm_notion_calendar_import_from_camden()
- *    2) notion_link_unlinked_contacts_to_sauron()
- *    3) notion_link_unlinked_companies_to_sauron()
+ *    1) link_unlinked_contacts()
+ *    2) link_unlinked_orgs()
  *
  * ✅ Notes:
  * - This WILL take longer than "queue" mode. If Notion times out, switch back to queue.
@@ -110,25 +109,18 @@ function doPost(e) {
     // --- RUN PIPELINE ---
     const steps = []
 
-    steps.push(runStep_("calcrm_notion_calendar_import_from_camden", () => {
-      if (typeof calcrm_notion_calendar_import_from_camden !== "function") {
-        throw new Error("Missing function: calcrm_notion_calendar_import_from_camden")
+    steps.push(runStep_("link_unlinked_contacts", () => {
+      if (typeof link_unlinked_contacts !== "function") {
+        throw new Error("Missing function: link_unlinked_contacts")
       }
-      return calcrm_notion_calendar_import_from_camden()
+      return link_unlinked_contacts()
     }))
 
-    steps.push(runStep_("notion_link_unlinked_contacts_to_sauron", () => {
-      if (typeof notion_link_unlinked_contacts_to_sauron !== "function") {
-        throw new Error("Missing function: notion_link_unlinked_contacts_to_sauron")
+    steps.push(runStep_("link_unlinked_orgs", () => {
+      if (typeof link_unlinked_orgs !== "function") {
+        throw new Error("Missing function: link_unlinked_orgs")
       }
-      return notion_link_unlinked_contacts_to_sauron()
-    }))
-
-    steps.push(runStep_("notion_link_unlinked_companies_to_sauron", () => {
-      if (typeof notion_link_unlinked_companies_to_sauron !== "function") {
-        throw new Error("Missing function: notion_link_unlinked_companies_to_sauron")
-      }
-      return notion_link_unlinked_companies_to_sauron()
+      return link_unlinked_orgs()
     }))
 
     // Determine overall result
