@@ -7,7 +7,6 @@
  *  - Run only Stripe
  *  - Run The Ring only
  *  - Rebuild canon tables
- *  - Sync CRM to Notion
  *
  * Notes:
  * - Each action uses LockService via lockWrap()
@@ -32,7 +31,6 @@
  *   render_arr_waterfall_facts()
  *   render_onboarding_stats()
  *   render_org_conversion_stats()
- *   sync_crm_to_notion (link + sync all)
  *   writeSyncLog(step, status, rows_in, rows_out, seconds, error)
  *   lockWrap(fn)  (your shared utility)
  **************************************************************/
@@ -55,9 +53,6 @@ function onOpen() {
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
     .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
-    .addSeparator()
-    .addItem('Sync CRM to Notion', 'ui_sync_crm_to_notion')
-    .addItem('CRM Dedup Cleanup', 'ui_crm_dedup_cleanup')
     .addToUi()
 }
 
@@ -168,24 +163,6 @@ function ui_render_weekly_ss_report() {
   return uiRunWrapped_('ui_render_weekly_ss_report', () => {
     runSteps_([
       { name: 'render_weekly_ss_report', fn: render_weekly_ss_report }
-    ])
-  })
-}
-
-
-function ui_sync_crm_to_notion() {
-  return uiRunWrapped_('ui_sync_crm_to_notion', () => {
-    runSteps_([
-      { name: 'link_unlinked_orgs', fn: link_unlinked_orgs },
-      { name: 'link_unlinked_contacts', fn: link_unlinked_contacts }
-    ])
-  })
-}
-
-function ui_crm_dedup_cleanup() {
-  return uiRunWrapped_('ui_crm_dedup_cleanup', () => {
-    runSteps_([
-      { name: 'crm_dedup_cleanup', fn: crm_dedup_cleanup }
     ])
   })
 }

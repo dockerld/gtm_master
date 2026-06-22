@@ -126,11 +126,8 @@ function render_all_stats_view() {
       seatTypes
     })
 
-    // Write Promo Audit sheet
-    ALLSTATS_renderPromoAudit_(ss, conversion)
-
     // Clean up deprecated sheets
-    const deprecatedSheets = ['Seat Audit', 'Conversion Audit', 'arr_subscription_mapping_audit', 'No Login again']
+    const deprecatedSheets = ['Seat Audit', 'Conversion Audit', 'arr_subscription_mapping_audit', 'No Login again', 'Promo Audit']
     for (const name of deprecatedSheets) {
       const old = ss.getSheetByName(name)
       if (old) { try { ss.deleteSheet(old) } catch (e) {} }
@@ -1507,59 +1504,6 @@ function ALLSTATS_pickPromoSourceLabel_(org) {
   else if (redemptionCodeIds) labels.push(redemptionCodeIds)
   if (org.has_manual_trial_extension) labels.push('manual trial_extended')
   return labels.join(' | ')
-}
-
-function ALLSTATS_renderPromoAudit_(ss, conversion) {
-  const orgs = buildConversionOrgList_(ss)
-  const promoOrgs = orgs.filter(o => o.has_promo)
-
-  // Sort: paid first, then trialing, then expired; within each group sort by org name
-  const statusRank = o => {
-    if (o.first_payment_at) return 0   // converted
-    if (o.is_currently_trialing) return 1  // still trialing
-    return 2  // expired
-  }
-  promoOrgs.sort((a, b) => {
-    const ra = statusRank(a), rb = statusRank(b)
-    if (ra !== rb) return ra - rb
-    return String(a.org_name || '').localeCompare(String(b.org_name || ''))
-  })
-
-  const headers = [
-    'org_name', 'org_id', 'owner_email', 'org_status',
-    'promo_codes', 'extension_source',
-    'org_created_at', 'trial_ends_at', 'first_payment_at',
-    'converted', 'still_trialing'
-  ]
-
-  const rows = promoOrgs.map(o => [
-    o.org_name,
-    o.org_id,
-    o.owner_email,
-    o.org_status,
-    o.promo_codes,
-    o.trial_extension_source || '',
-    o.org_created_at || '',
-    o.trial_ends_at || '',
-    o.first_payment_at || '',
-    o.first_payment_at ? 'Yes' : 'No',
-    o.is_currently_trialing ? 'Yes' : 'No'
-  ])
-
-  const sh = ALLSTATS_getOrCreateSheet_(ss, 'Promo Audit')
-  sh.clear()
-  try { sh.clearNotes() } catch (e) {}
-
-  sh.getRange(1, 1, 1, headers.length).setValues([headers])
-    .setFontWeight('bold').setBackground('#F3F4F6')
-
-  if (rows.length) {
-    sh.getRange(2, 1, rows.length, headers.length).setValues(rows)
-    // Format date columns: org_created_at=7, trial_ends_at=8, first_payment_at=9
-    sh.getRange(2, 7, rows.length, 3).setNumberFormat('yyyy-mm-dd')
-  }
-
-  sh.autoResizeColumns(1, headers.length)
 }
 
 function ALLSTATS_renderAllStatsSheet_(sheet, data) {
