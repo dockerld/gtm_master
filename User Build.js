@@ -87,25 +87,16 @@ function build_canon_users() {
           'pm_financial_cents_first_connected_date',
 
           // manual overrides
-          'service_override',
-          'white_glove_override',
-          'in_onboarding_override',
           'tags_override',
           'note_override',
 
           // derived effective values
-          'service_effective',
-          'white_glove_effective',
-          'in_onboarding_effective',
           'tags_effective',
 
           'updated_at'
         ],
 
         MANUAL_FIELDS: new Set([
-          'service_override',
-          'white_glove_override',
-          'in_onboarding_override',
           'tags_override',
           'note_override'
         ])
@@ -212,6 +203,29 @@ function build_canon_users() {
         if (!d) return ''
         // use UTC to avoid timezone “off by one day” surprises for ISO Z strings
         return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd')
+      }
+
+      // Hot-path equivalent of asYMD_ that avoids Utilities.formatDate (which is
+      // expensive when called per-row over the full, ever-growing login_events sheet).
+      // Returns UTC yyyy-MM-dd. Behavior matches asYMD_ for Date objects, date-only
+      // strings, ISO strings, and numeric epoch values.
+      function fastYMD_(value) {
+        if (value instanceof Date) {
+          return isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10)
+        }
+        const s = String(value == null ? '' : value).trim()
+        if (!s) return ''
+        // Already date-only or ISO datetime → first 10 chars are yyyy-MM-dd
+        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10)
+        // Numeric epoch (seconds or millis)
+        if (/^\d+$/.test(s)) {
+          const n = Number(s)
+          if (!isFinite(n)) return ''
+          const d = new Date(n > 1e12 ? n : n * 1000)
+          return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10)
+        }
+        const d = new Date(s)
+        return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10)
       }
 
       function daysBetweenYMD_(ymdA, ymdB) {
@@ -455,17 +469,21 @@ function build_canon_users() {
 
           if (cEmail && cLoginDate) {
             const lastRow = shEvents.getLastRow()
-            const lastCol = shEvents.getLastColumn()
-            const data = shEvents.getRange(2, 1, lastRow - 1, lastCol).getValues()
+            const n = lastRow - 1
+            // Read ONLY the two columns we need (email + login_date) instead of the
+            // full row width. login_events is append-only and the widest/largest
+            // sheet, so narrowing the read is a big transfer win.
+            const emailsCol = shEvents.getRange(2, cEmail, n, 1).getValues()
+            const datesCol = shEvents.getRange(2, cLoginDate, n, 1).getValues()
 
             const datesByEmail = new Map() // email_key -> Set(yyyy-MM-dd)
-            data.forEach(r => {
-              const emailKey = normalizeEmailSafe_(String(r[cEmail - 1] || ''))
-              const loginDate = asYMD_(r[cLoginDate - 1]) // normalize if it’s Date/ISO
-              if (!emailKey || !loginDate) return
+            for (let i = 0; i < n; i++) {
+              const emailKey = normalizeEmailSafe_(String(emailsCol[i][0] || ''))
+              const loginDate = fastYMD_(datesCol[i][0]) // cheap normalize (no Utilities.formatDate)
+              if (!emailKey || !loginDate) continue
               if (!datesByEmail.has(emailKey)) datesByEmail.set(emailKey, new Set())
               datesByEmail.get(emailKey).add(loginDate)
-            })
+            }
 
             const out = new Map()
             datesByEmail.forEach((set, emailKey) => {
@@ -518,9 +536,6 @@ function build_canon_users() {
         if (!headerMap['email_key']) return {}
 
         const cEmailKey = headerMap['email_key'] - 1
-        const cService = headerMap['service_override'] ? headerMap['service_override'] - 1 : null
-        const cWG = headerMap['white_glove_override'] ? headerMap['white_glove_override'] - 1 : null
-        const cOnb = headerMap['in_onboarding_override'] ? headerMap['in_onboarding_override'] - 1 : null
         const cTags = headerMap['tags_override'] ? headerMap['tags_override'] - 1 : null
         const cNote = headerMap['note_override'] ? headerMap['note_override'] - 1 : null
 
@@ -531,9 +546,6 @@ function build_canon_users() {
           const emailKey = normalizeEmailSafe_(String(r[cEmailKey] || ''))
           if (!emailKey) return
           out[emailKey] = {
-            service_override: cService != null ? String(r[cService] || '').trim() : '',
-            white_glove_override: cWG != null ? r[cWG] === true : false,
-            in_onboarding_override: cOnb != null ? r[cOnb] === true : false,
             tags_override: cTags != null ? String(r[cTags] || '').trim() : '',
             note_override: cNote != null ? String(r[cNote] || '').trim() : ''
           }
@@ -560,17 +572,29 @@ function build_canon_users() {
         sheet.getRange(1, 1, 1, headers.length).setValues([headers])
         sheet.setFrozenRows(1)
         if (rows && rows.length) batchSetValuesSafe_(sheet, 2, 1, rows, 5000)
-        sheet.autoResizeColumns(1, headers.length)
+      }
+
+      // ---------- Sub-step timing (writes to pipeline_log for visibility) ----------
+      // Lets us see exactly which phase of build_canon_users dominates. Safe no-op
+      // if writePipelineLog_ isn't present.
+      function phase_(label, fn) {
+        const p0 = new Date()
+        const result = fn()
+        const secs = (new Date() - p0) / 1000
+        if (typeof writePipelineLog_ === 'function') {
+          try { writePipelineLog_('build_canon_users', { step: label, status: 'ok', seconds: secs }) } catch (e) {}
+        }
+        return result
       }
 
       // ---------- Build indices ----------
-      const membershipIdx = buildMembershipIndex_(mems)
-      const metricsByEmail = buildMetricsIndex_(metrics)
-      const loginRollups = buildLoginRollups_()
+      const membershipIdx = phase_('idx_memberships', () => buildMembershipIndex_(mems))
+      const metricsByEmail = phase_('idx_metrics', () => buildMetricsIndex_(metrics))
+      const loginRollups = phase_('login_rollups', () => buildLoginRollups_())
 
       // ---------- Manual preservation ----------
       const canonSheet = getOrCreateSheetSafe_(CFG.SHEETS.CANON_USERS)
-      const existingManual = readExistingManualOverrides_(canonSheet)
+      const existingManual = phase_('read_manual_overrides', () => readExistingManualOverrides_(canonSheet))
 
       // ---------- Build output ----------
       const today = new Date()
@@ -579,29 +603,71 @@ function build_canon_users() {
       const out = []
       const rowsIn = users.rows.length
 
+      // Precompute column indices once (-1 if absent) to avoid per-row map lookups.
+      const colOrNeg1_ = (h) => users.has(h) ? users.col(h) : -1
+      const COL = {
+        clerk_user_id: colOrNeg1_('clerk_user_id'),
+        user_id: colOrNeg1_('user_id'),
+        email: colOrNeg1_('email'),
+        email_key: colOrNeg1_('email_key'),
+        name: colOrNeg1_('name'),
+        full_name: colOrNeg1_('full_name'),
+        first_name: colOrNeg1_('first_name'),
+        last_name: colOrNeg1_('last_name'),
+        created_at: colOrNeg1_('created_at')
+      }
+
+      // Resolve last-login column once (same priority + fuzzy rules as pickLastLoginFromClerkUsersRow_)
+      const LAST_LOGIN_COL = (() => {
+        const candidates = [
+          'last_login_date',
+          'last_sign_in_at',
+          'last_sign_in_date',
+          'last_login_at',
+          'last_active_at',
+          'last_seen_at'
+        ]
+        for (const h of candidates) {
+          if (users.has(h)) return users.col(h)
+        }
+        const keys = Object.keys(users.map || {})
+        const fuzzy = keys.find(k => {
+          const kk = String(k || '').toLowerCase()
+          const hasLast = kk.includes('last')
+          const hasSignal =
+            kk.includes('login') ||
+            (kk.includes('sign') && kk.includes('in')) ||
+            kk.includes('active') ||
+            kk.includes('seen')
+          return hasLast && hasSignal
+        })
+        return (fuzzy && users.map[fuzzy]) ? users.map[fuzzy] - 1 : -1
+      })()
+
+      const _loopT0 = new Date()
       users.rows.forEach(r => {
         const clerkUserId =
-          users.has('clerk_user_id') ? String(r[users.col('clerk_user_id')] || '').trim() :
-          users.has('user_id') ? String(r[users.col('user_id')] || '').trim() :
+          COL.clerk_user_id >= 0 ? String(r[COL.clerk_user_id] || '').trim() :
+          COL.user_id >= 0 ? String(r[COL.user_id] || '').trim() :
           ''
 
-        const email = users.has('email') ? String(r[users.col('email')] || '').trim() : ''
+        const email = COL.email >= 0 ? String(r[COL.email] || '').trim() : ''
         const emailKey =
-          users.has('email_key') ? normalizeEmailSafe_(String(r[users.col('email_key')] || '')) :
+          COL.email_key >= 0 ? normalizeEmailSafe_(String(r[COL.email_key] || '')) :
           normalizeEmailSafe_(email)
 
         if (!emailKey) return
 
         const name =
-          users.has('name') ? String(r[users.col('name')] || '').trim() :
-          users.has('full_name') ? String(r[users.col('full_name')] || '').trim() :
+          COL.name >= 0 ? String(r[COL.name] || '').trim() :
+          COL.full_name >= 0 ? String(r[COL.full_name] || '').trim() :
           (() => {
-            const first = users.has('first_name') ? String(r[users.col('first_name')] || '').trim() : ''
-            const last = users.has('last_name') ? String(r[users.col('last_name')] || '').trim() : ''
+            const first = COL.first_name >= 0 ? String(r[COL.first_name] || '').trim() : ''
+            const last = COL.last_name >= 0 ? String(r[COL.last_name] || '').trim() : ''
             return `${first} ${last}`.trim()
           })()
 
-        const createdAtRaw = users.has('created_at') ? r[users.col('created_at')] : ''
+        const createdAtRaw = COL.created_at >= 0 ? r[COL.created_at] : ''
 
         const mem =
           (clerkUserId && membershipIdx.byUserId.has(clerkUserId)) ? membershipIdx.byUserId.get(clerkUserId) :
@@ -611,7 +677,7 @@ function build_canon_users() {
         const login = loginRollups.get(emailKey) || emptyLogin_()
 
         // ✅ Truth: last login comes from raw_clerk_users row (handles Date objects + ISO strings)
-        const lastLoginFromClerk = pickLastLoginFromClerkUsersRow_(users, r)
+        const lastLoginFromClerk = LAST_LOGIN_COL >= 0 ? asYMD_(r[LAST_LOGIN_COL]) : ''
         const lastLoginYMD = lastLoginFromClerk || login.last_login_date || ''
 
         const daysWithPing = computeDaysWithPing_(createdAtRaw, todayStr)
@@ -620,16 +686,10 @@ function build_canon_users() {
         const daysSinceLastLogin = lastLoginYMD ? daysBetweenYMD_(lastLoginYMD, todayStr) : ''
 
         const manual = existingManual[emailKey] || {
-          service_override: '',
-          white_glove_override: false,
-          in_onboarding_override: false,
           tags_override: '',
           note_override: ''
         }
 
-        const serviceEff = manual.service_override || ''
-        const whiteGloveEff = manual.white_glove_override === true
-        const inOnbEff = manual.in_onboarding_override === true
         const tagsEff = manual.tags_override || ''
 
         out.push([
@@ -670,22 +730,19 @@ function build_canon_users() {
           m.pm_financial_cents_connected,
           m.pm_financial_cents_first_connected_date,
 
-          manual.service_override,
-          manual.white_glove_override === true,
-          manual.in_onboarding_override === true,
           manual.tags_override,
           manual.note_override,
 
-          serviceEff,
-          whiteGloveEff,
-          inOnbEff,
           tagsEff,
 
           today
         ])
       })
+      if (typeof writePipelineLog_ === 'function') {
+        try { writePipelineLog_('build_canon_users', { step: 'main_loop', status: 'ok', seconds: (new Date() - _loopT0) / 1000 }) } catch (e) {}
+      }
 
-      writeCanonOverwrite_(canonSheet, CFG.CANON_HEADERS, out)
+      phase_('write_canon', () => writeCanonOverwrite_(canonSheet, CFG.CANON_HEADERS, out))
 
       if (typeof writeSyncLog === 'function') {
         writeSyncLog(STEP, 'ok', rowsIn, out.length, (new Date() - t0) / 1000, '')

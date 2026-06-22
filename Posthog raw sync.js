@@ -42,8 +42,9 @@ const POSTHOG_RAW_CFG = {
   PROJECT_ID_FALLBACK: '179975',
   API_BASE: 'https://app.posthog.com/api',
 
-  // ↓ Lower batch size helps avoid large query payloads/timeouts
-  BATCH_SIZE: 100,
+  // Batch size for HogQL email-keyed queries.
+  // 250 is a conservative bump from 100 — 20MB body / 50k row limits give plenty of headroom.
+  BATCH_SIZE: 250,
 
   // ↓ Slightly more breathing room between batches
   PAUSE_MS: 300,
@@ -74,7 +75,8 @@ const POSTHOG_RAW_CFG = {
     DEST: 'raw_posthog_user_metrics',
     DEST_ORGS: 'raw_posthog_orgs',
     DEST_ORG_SUBSCRIPTIONS: 'raw_posthog_org_subscriptions',
-    DEST_PROMO_REDEMPTIONS: 'promo_redemptions'
+    DEST_PROMO_REDEMPTIONS: 'promo_redemptions',
+    DEST_HEALTH_SCORES: 'raw_posthog_health_scores'
   },
 
   SOURCE_HEADERS: {
@@ -452,7 +454,7 @@ function posthog_pull_orgs_to_raw() {
 
   const headers = [
     'app_org_id',
-    'org_id',
+    'clerk_org_id',
     'org_name',
     'org_status',
     'billing_email',
@@ -476,16 +478,18 @@ function posthog_pull_orgs_to_raw() {
     if (!orgId) return
     seen.add(orgId)
 
-    const orgName = String(r && r[1] != null ? r[1] : '')
-    const orgStatus = String(r && r[2] != null ? r[2] : '').toLowerCase().trim()
-    const ownerUserId = String(r && r[3] != null ? r[3] : '')
-    const billingEmail = String(r && r[4] != null ? r[4] : '')
-    const createdAt = String(r && r[5] != null ? r[5] : '')
-    const updatedAt = String(r && r[6] != null ? r[6] : '')
-    const subSortAt = String(r && r[7] != null ? r[7] : '')
+    const clerkOrgId = String(r && r[1] != null ? r[1] : '').trim()
+    const orgName = String(r && r[2] != null ? r[2] : '')
+    const orgStatus = String(r && r[3] != null ? r[3] : '').toLowerCase().trim()
+    const ownerUserId = String(r && r[4] != null ? r[4] : '')
+    const billingEmail = String(r && r[5] != null ? r[5] : '')
+    const createdAt = String(r && r[6] != null ? r[6] : '')
+    const updatedAt = String(r && r[7] != null ? r[7] : '')
+    const subSortAt = String(r && r[8] != null ? r[8] : '')
 
     if (!orgMetaById.has(orgId)) {
       orgMetaById.set(orgId, {
+        clerk_org_id: clerkOrgId,
         org_name: orgName,
         org_status: orgStatus,
         owner_user_id: ownerUserId,
@@ -498,6 +502,7 @@ function posthog_pull_orgs_to_raw() {
     }
 
     const cur = orgMetaById.get(orgId)
+    if (!cur.clerk_org_id && clerkOrgId) cur.clerk_org_id = clerkOrgId
     if (!cur.org_name && orgName) cur.org_name = orgName
     if (!cur.created_at && createdAt) cur.created_at = createdAt
     if (!cur.updated_at && updatedAt) cur.updated_at = updatedAt
@@ -519,7 +524,7 @@ function posthog_pull_orgs_to_raw() {
     const agg = subAggByOrgId.get(orgId) || posthogEmptyOrgSubAgg_()
     rowsOut.push([
       orgId,
-      orgId,
+      String(meta.clerk_org_id || ''),
       String(meta.org_name || ''),
       String(meta.org_status || ''),
       String(meta.billing_email || ''),
@@ -541,7 +546,7 @@ function posthog_pull_orgs_to_raw() {
     if (!orgId || seen.has(orgId)) return
     rowsOut.push([
       orgId,
-      orgId,
+      '',
       '',
       '',
       '',
@@ -1432,6 +1437,7 @@ function posthogBuildHogQL_orgsMinimal_(tableExpr) {
   return `
 SELECT
   toString(o.id) AS org_id,
+  toString(o.external_id) AS clerk_org_id,
   toString(o.name) AS org_name,
   '' AS org_status,
   '' AS billing_email,
@@ -1450,6 +1456,7 @@ function posthogBuildHogQL_orgsCore_(tableExpr) {
   return `
 SELECT
   toString(o.id) AS org_id,
+  toString(o.external_id) AS clerk_org_id,
   toString(o.name) AS org_name,
   '' AS org_status,
   '' AS billing_email,
@@ -1468,6 +1475,7 @@ function posthogBuildHogQL_orgsIdOnly_(tableExpr) {
   return `
 SELECT
   toString(o.id) AS org_id,
+  toString(o.external_id) AS clerk_org_id,
   '' AS org_name,
   '' AS org_status,
   '' AS billing_email,
@@ -1486,6 +1494,7 @@ function posthogBuildHogQL_orgsJoined_(tableExpr) {
   return `
 SELECT
   toString(o.id) AS org_id,
+  toString(o.external_id) AS clerk_org_id,
   toString(o.name) AS org_name,
   toString(os.status) AS org_status,
   toString(os.owner_user_id) AS owner_user_id,
@@ -1742,6 +1751,154 @@ function posthogOverwriteSheet_(sheet, headers, rows) {
     else sheet.getRange(2, 1, rows.length, rows[0].length).setValues(rows)
   }
   sheet.autoResizeColumns(1, headers.length)
+}
+
+/**
+ * Pull org-level health scores from PostHog into raw_posthog_health_scores.
+ * Groups by email domain (account) and computes a weighted engagement score.
+ */
+function posthog_pull_health_scores_to_raw() {
+  const t0 = new Date()
+  const props = PropertiesService.getScriptProperties()
+
+  const apiKey = props.getProperty('POSTHOG_API_KEY')
+  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+
+  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+
+  const hogql = `
+WITH recordings AS (
+  SELECT
+    replaceRegexpAll(u.email, '^[^@]+@', '') as account,
+    count(DISTINCT u.id) as users,
+    greatest(dateDiff('day', min(u.created_at), now()) / 30.0, 1) as months_on_platform,
+    count(DISTINCT if(m.recorded_event_id IS NOT NULL, m.id, NULL)) as recorded_meetings
+  FROM postgres_users u
+  LEFT JOIN postgres_meetings m ON m.user_id = u.id
+  GROUP BY account
+  HAVING account NOT IN ('pingassistant.com', 'pingassistant.dev', 'gmail.com')
+    AND count(DISTINCT m.id) > 0
+),
+chats AS (
+  SELECT
+    replaceRegexpAll(u.email, '^[^@]+@', '') as account,
+    count(DISTINCT if(mm.role = 'user', mm.id, NULL)) as chat_msgs
+  FROM postgres_users u
+  JOIN postgres.mastra.mastra_threads t ON substring(t.id, 8, 36) = toString(u.id)
+  JOIN postgres.mastra.mastra_messages mm ON mm.thread_id = t.id
+  WHERE t.id LIKE 'global-%'
+  GROUP BY account
+),
+client_views AS (
+  SELECT
+    replaceRegexpAll(cpv.user_email, '^[^@]+@', '') as account,
+    sum(cpv.pageview_count) as views
+  FROM client_page_views cpv
+  GROUP BY account
+),
+meeting_views AS (
+  SELECT
+    replaceRegexpAll(person.properties.email, '^[^@]+@', '') as account,
+    count(*) as views
+  FROM events
+  WHERE event = '$pageview'
+    AND properties.$current_url LIKE '%pingassistant.com/meetings/%'
+    AND timestamp > now() - interval 90 day
+    AND person.properties.email IS NOT NULL
+  GROUP BY account
+),
+searches AS (
+  SELECT
+    replaceRegexpAll(person.properties.email, '^[^@]+@', '') as account,
+    count(*) as search_count
+  FROM events
+  WHERE event = '$pageview'
+    AND properties.has_search_query = true
+    AND timestamp > now() - interval 90 day
+    AND person.properties.email IS NOT NULL
+  GROUP BY account
+)
+SELECT
+  r.account,
+  r.users,
+  ROUND(r.months_on_platform, 1) as months_active,
+  r.recorded_meetings,
+  ROUND(r.recorded_meetings / r.users / r.months_on_platform, 1) as rec_per_user_mo,
+  coalesce(c.chat_msgs, 0) as chat_msgs,
+  ROUND(coalesce(c.chat_msgs, 0) / r.users / r.months_on_platform, 1) as chat_per_user_mo,
+  coalesce(cv.views, 0) as client_views,
+  ROUND(coalesce(cv.views, 0) / r.users / r.months_on_platform, 1) as client_views_per_user_mo,
+  coalesce(mv.views, 0) as meeting_views,
+  ROUND(coalesce(mv.views, 0) / r.users / r.months_on_platform, 1) as mtg_views_per_user_mo,
+  coalesce(s.search_count, 0) as searches,
+  ROUND(coalesce(s.search_count, 0) / r.users / r.months_on_platform, 1) as searches_per_user_mo,
+  ROUND(
+    least(r.recorded_meetings / r.users / r.months_on_platform / 10.0, 1) * 25
+    + least(coalesce(c.chat_msgs, 0) / r.users / r.months_on_platform / 1.0, 1) * 25
+    + least(coalesce(cv.views, 0) / r.users / r.months_on_platform / 3.0, 1) * 20
+    + least(coalesce(mv.views, 0) / r.users / r.months_on_platform / 5.0, 1) * 20
+    + least(coalesce(s.search_count, 0) / r.users / r.months_on_platform / 2.0, 1) * 10,
+  0) as health_score
+FROM recordings r
+LEFT JOIN chats c ON c.account = r.account
+LEFT JOIN client_views cv ON cv.account = r.account
+LEFT JOIN meeting_views mv ON mv.account = r.account
+LEFT JOIN searches s ON s.account = r.account
+ORDER BY health_score DESC
+LIMIT 300
+`
+
+  const results = posthogRunQuery_(apiKey, projectId, hogql, 'health_scores')
+  const pulledAt = new Date()
+
+  const headers = [
+    'account',
+    'users',
+    'months_active',
+    'recorded_meetings',
+    'rec_per_user_mo',
+    'chat_msgs',
+    'chat_per_user_mo',
+    'client_views',
+    'client_views_per_user_mo',
+    'meeting_views',
+    'mtg_views_per_user_mo',
+    'searches',
+    'searches_per_user_mo',
+    'health_score',
+    'pulled_at'
+  ]
+
+  const rowsOut = (results || []).map(r => [
+    String(r[0] || ''),
+    Number(r[1] || 0),
+    Number(r[2] || 0),
+    Number(r[3] || 0),
+    Number(r[4] || 0),
+    Number(r[5] || 0),
+    Number(r[6] || 0),
+    Number(r[7] || 0),
+    Number(r[8] || 0),
+    Number(r[9] || 0),
+    Number(r[10] || 0),
+    Number(r[11] || 0),
+    Number(r[12] || 0),
+    Number(r[13] || 0),
+    pulledAt
+  ])
+
+  const ss = SpreadsheetApp.getActive()
+  const dest = getOrCreateSheetSafe_(ss, POSTHOG_RAW_CFG.SHEETS.DEST_HEALTH_SCORES)
+  posthogOverwriteSheet_(dest, headers, rowsOut)
+
+  posthogWriteSyncLogSafe_(
+    'posthog_pull_health_scores_to_raw',
+    'ok',
+    rowsOut.length,
+    rowsOut.length,
+    (new Date() - t0) / 1000,
+    ''
+  )
 }
 
 /* =========================

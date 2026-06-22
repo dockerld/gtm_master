@@ -93,7 +93,9 @@ function render_org_subscription_info() {
         // ── Discount-adjusted amounts from Stripe sync ──
         'amount_after_discounts',
         'amount_after_discounts_monthly',
-        'amount_after_discounts_yearly'
+        'amount_after_discounts_yearly',
+        'cancel_at_period_end',
+        'churn_reason'
       ]
 
       const rowsOut = orgs.map(org => {
@@ -112,6 +114,15 @@ function render_org_subscription_info() {
           ''
         const trialDaysRemaining = ORGSUBINFO_computeTrialDaysRemaining_(trialEndForRemaining, new Date())
         const promoUsed = !!promo
+        const subStatus = ORGSUBINFO_str_(ORGSUBINFO_val_(sub, 'status')).toLowerCase()
+        const cancelAtPeriodEnd = ORGSUBINFO_toBoolOrBlank_(ORGSUBINFO_val_(sub, 'cancel_at_period_end'))
+        const currentPeriodEndRaw =
+          ORGSUBINFO_val_(sub, 'current_period_end') ||
+          ORGSUBINFO_val_(orgSub, 'current_period_end') ||
+          ''
+        const churnDateRaw = (subStatus === 'canceled')
+          ? (ORGSUBINFO_val_(sub, 'canceled_at') || currentPeriodEndRaw)
+          : (cancelAtPeriodEnd ? currentPeriodEndRaw : '')
         const lastPromoUsed =
           ORGSUBINFO_str_(promo && promo.promo_code) ||
           ORGSUBINFO_str_(promo && promo.promo_name) ||
@@ -129,11 +140,7 @@ function render_org_subscription_info() {
           ORGSUBINFO_val_(sub, 'status'),
           ORGSUBINFO_toDateOrBlank_(ORGSUBINFO_val_(sub, 'created_at')),
           ORGSUBINFO_toDateOrBlank_(ORGSUBINFO_val_(sub, 'first_payment_at')),
-          ORGSUBINFO_toDateOrBlank_(
-            ORGSUBINFO_str_(ORGSUBINFO_val_(sub, 'status')).toLowerCase() === 'canceled'
-              ? ORGSUBINFO_val_(sub, 'canceled_at') || ORGSUBINFO_val_(sub, 'current_period_end')
-              : ''
-          ),
+          ORGSUBINFO_toDateOrBlank_(churnDateRaw),
           ORGSUBINFO_pickPlanName_(sub),
           ORGSUBINFO_val_(sub, 'stripe_customer_id'),
           ORGSUBINFO_val_(sub, 'customer_email'),
@@ -149,7 +156,7 @@ function render_org_subscription_info() {
           ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_monthly')),
           ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_yearly')),
           ORGSUBINFO_toDateOrBlank_(ORGSUBINFO_val_(orgSub, 'trial_ends_at')),
-          ORGSUBINFO_toDateOrBlank_(ORGSUBINFO_val_(orgSub, 'current_period_end')),
+          ORGSUBINFO_toDateOrBlank_(currentPeriodEndRaw),
           trialDaysRemaining,
           promoUsed,
           lastPromoUsed,
@@ -167,7 +174,9 @@ function render_org_subscription_info() {
           // ── Discount-adjusted amounts from Stripe sync ──
           ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts')),
           ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts_monthly')),
-          ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts_yearly'))
+          ORGSUBINFO_numOrBlank_(ORGSUBINFO_val_(sub, 'amount_after_discounts_yearly')),
+          cancelAtPeriodEnd,
+          ORGSUBINFO_str_(ORGSUBINFO_val_(sub, 'cancellation_reason'))
         ]
       })
 

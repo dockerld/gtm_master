@@ -193,7 +193,7 @@ function PROMOTRIAL_buildCanonMaps_(rows) {
   const orgCreatedAtByOrgId = new Map()
 
   for (const r of (rows || [])) {
-    const orgId = PROMOTRIAL_str_(r.app_org_id || r.org_id || r.clerk_org_id)
+    const orgId = PROMOTRIAL_str_(r.app_org_id || r.org_id)
     const orgName = PROMOTRIAL_str_(r.org_name || r.posthog_org_name || r.org_slug)
     const orgCreatedAt = PROMOTRIAL_str_(r.org_created_at || r.posthog_org_created_at || r.created_at)
     if (orgId && orgName && !orgNameByOrgId.has(orgId)) orgNameByOrgId.set(orgId, orgName)

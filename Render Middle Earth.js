@@ -71,7 +71,7 @@ function render_middle_earth_view() {
       const outRows = []
 
       for (const org of canonOrgs) {
-        const orgId = MIDDLEEARTH_str_(org.app_org_id || org.org_id || org.clerk_org_id)
+        const orgId = MIDDLEEARTH_str_(org.app_org_id || org.org_id)
         if (!orgId) continue
 
         const orgName = MIDDLEEARTH_str_(org.org_name || org.posthog_org_name || org.org_slug)
@@ -94,7 +94,7 @@ function render_middle_earth_view() {
 
         outRows.push([
           orgName,
-          MIDDLEEARTH_toBool_(org.in_onboarding),
+          false,
           daysWithPing,
           seats,
           userAgg.meetingsRecorded,

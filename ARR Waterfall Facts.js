@@ -3,12 +3,13 @@
  *
  * Builds the "arr_waterfall_facts" table from arr_snapshot.
  * Output columns:
- *   snapshot_date | cohort_month_trial | cohort_month_subscription | cohort_month_paid |
- *   org_id | org_name | subscription_start_date | trial_start_date | purchase_date |
+ *   snapshot_date | org_id | org_name | org_creation_date | first_payment_date |
+ *   churn_date | sign_up_cohort_month | paid_cohort_month | current_status |
+ *   ring_bucket | plan_name | billing_frequency | subscription_start_date |
  *   metric | amount
  *
  * Metrics (rows):
- *   SOM, Upgrade, Downgrade, Churn, EOM
+ *   SOM, New, Upgrade, Downgrade, Churn, EOM
  **************************************************************/
 
 const ARR_WATERFALL_CFG = {
@@ -25,8 +26,9 @@ const ARR_WATERFALL_CFG = {
   FIRST_PAYMENT_HEADER: 'first_payment_date',
   CHURN_DATE_HEADER: 'churn_date',
   COHORT_HEADER: 'sign_up_cohort_month',
-  FIRST_PAYMENT_COHORT_HEADER: 'first_payment_cohort_month',
+  PAID_COHORT_HEADER: 'paid_cohort_month',
   STATUS_HEADER: 'current_status',
+  RING_BUCKET_HEADER: 'ring_bucket',
   PLAN_HEADER: 'plan_name',
   BILLING_FREQ_HEADER: 'billing_frequency',
   SUB_START_HEADER: 'subscription_start_date',
@@ -71,8 +73,9 @@ function render_arr_waterfall_facts() {
       h.toLowerCase() === 'cohort_month' ||
       h.toLowerCase() === 'trial_cohort_month'
     )
-    const firstPaymentCohortIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.FIRST_PAYMENT_COHORT_HEADER.toLowerCase())
+    const paidCohortIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.PAID_COHORT_HEADER.toLowerCase())
     const statusIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.STATUS_HEADER.toLowerCase())
+    const ringBucketIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.RING_BUCKET_HEADER.toLowerCase())
     const planIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.PLAN_HEADER.toLowerCase())
     const billingFreqIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.BILLING_FREQ_HEADER.toLowerCase())
     const subStartIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.SUB_START_HEADER.toLowerCase())
@@ -102,14 +105,17 @@ function render_arr_waterfall_facts() {
       const firstPayment = ARR_waterfall_str_(r[firstPaymentIdx])
       const churnDate = (churnDateIdx >= 0) ? ARR_waterfall_str_(r[churnDateIdx]) : ''
       const cohortMonth = ARR_waterfall_formatCohort_(r[cohortIdx], tz)
-      const firstPaymentCohort = (firstPaymentCohortIdx >= 0)
-        ? ARR_waterfall_formatCohort_(r[firstPaymentCohortIdx], tz)
+      const paidCohort = (paidCohortIdx >= 0)
+        ? ARR_waterfall_formatCohort_(r[paidCohortIdx], tz)
         : ''
       const currentStatus = (statusIdx >= 0) ? ARR_waterfall_str_(r[statusIdx]) : ''
+      const ringBucket = (ringBucketIdx >= 0) ? ARR_waterfall_str_(r[ringBucketIdx]) : ''
       const planName = (planIdx >= 0) ? ARR_waterfall_str_(r[planIdx]) : ''
       const billingFreq = (billingFreqIdx >= 0) ? ARR_waterfall_str_(r[billingFreqIdx]) : ''
       const subscriptionStart = ARR_waterfall_str_(r[subStartIdx])
-      const eom = ARR_waterfall_num_(r[arrIdx])
+      let eom = ARR_waterfall_num_(r[arrIdx])
+      // Only paid bucket should have ARR in waterfall; override old snapshot rows
+      if (ringBucket && ringBucket !== 'paid') eom = 0
       const snapshotMs = ARR_waterfall_snapshotMs_(r[snapIdx])
       if (!snapshotMs) continue
       const orgKey = orgId || ('name:' + ARR_waterfall_normName_(orgName))
@@ -129,8 +135,9 @@ function render_arr_waterfall_facts() {
         firstPayment,
         churnDate,
         cohortMonth,
-        firstPaymentCohort,
+        paidCohort,
         currentStatus,
+        ringBucket,
         planName,
         billingFreq,
         subscriptionStart,
@@ -143,81 +150,225 @@ function render_arr_waterfall_facts() {
       return a.snapshotMs - b.snapshotMs
     })
 
-    // SOM baseline per org + month comes strictly from month-start snapshot (day 1).
+    // ── Build org first_payment_date month key (YYYY-MM) ──
+    const orgFirstPaymentMonth = new Map()
+    for (const rec of records) {
+      if (!rec.firstPayment) continue
+      const fpMs = ARR_waterfall_snapshotMs_(rec.firstPayment)
+      if (!fpMs) continue
+      const fpMonth = ARR_waterfall_monthKey_(fpMs)
+      const existing = orgFirstPaymentMonth.get(rec.orgKey)
+      if (!existing || fpMonth < existing) {
+        orgFirstPaymentMonth.set(rec.orgKey, fpMonth)
+      }
+    }
+
+    // ── Helper: was this org paid as of the start of a given month? ──
+    // If first_payment_date is in or after this month, they hadn't paid at month start
+    function orgHadPaidBeforeMonth_(orgKey, monthKey) {
+      const fpMonth = orgFirstPaymentMonth.get(orgKey)
+      if (!fpMonth) return false        // never paid
+      return fpMonth < monthKey          // paid in a prior month
+    }
+
+    // ── Build SOM per org+month from day-1 snapshots ──
+    // Override to 0 if the org hadn't paid before this month
+    // When multiple day-1 rows exist for the same org+month, take the max ARR
+    // (handles duplicate/stale snapshot rows with $0)
     const somByOrgMonth = new Map()
     for (const rec of records) {
       if (rec.dayOfMonth !== 1) continue
+      const val = orgHadPaidBeforeMonth_(rec.orgKey, rec.monthKey)
+        ? rec.eom
+        : 0
       const key = rec.orgKey + '|' + rec.monthKey
-      somByOrgMonth.set(key, rec.eom)
+      const existing = somByOrgMonth.get(key)
+      if (existing === undefined || val > existing) {
+        somByOrgMonth.set(key, val)
+      }
     }
 
-    const out = []
+    // ── Build latest snapshot per org+month (for current/incomplete months) ──
+    // Prefer latest date; on same date, prefer higher ARR (handles stale duplicates)
+    const latestByOrgMonth = new Map()
     for (const rec of records) {
-      const somKey = rec.orgKey + '|' + rec.monthKey
-      const som = ARR_waterfall_num_(somByOrgMonth.get(somKey) || 0)
-      const eom = ARR_waterfall_num_(rec.eom)
-      let upgrade = 0
-      let downgrade = 0
-      let churn = 0
-      if (som > 0 && eom === 0) {
-        churn = som
-      } else if (eom > som) {
-        upgrade = eom - som
-      } else if (eom < som && eom > 0) {
-        downgrade = som - eom
+      const key = rec.orgKey + '|' + rec.monthKey
+      const existing = latestByOrgMonth.get(key)
+      if (!existing || rec.snapshotMs > existing.snapshotMs ||
+          (rec.snapshotMs === existing.snapshotMs && rec.eom > existing.eom)) {
+        latestByOrgMonth.set(key, rec)
+      }
+    }
+
+    // ── Get all months sorted, determine current month ──
+    const allMonths = [...new Set(records.map(r => r.monthKey))].sort()
+    const todayMs = new Date().getTime()
+    const currentMonthKey = ARR_waterfall_monthKey_(todayMs)
+
+    // ── Collect all orgs that appear in any month ──
+    const allOrgs = new Set(records.map(r => r.orgKey))
+
+    // ── Build org metadata from latest record per org ──
+    const orgMeta = new Map()
+    for (const rec of records) {
+      const existing = orgMeta.get(rec.orgKey)
+      if (!existing || rec.snapshotMs > existing.snapshotMs) {
+        orgMeta.set(rec.orgKey, rec)
+      }
+    }
+
+    // ── Build waterfall: one set of metrics per org per month ──
+    // Track which orgs have appeared with ARR at runtime (for New vs Upgrade).
+    // Months are processed in order, so the first time an org has EOM > 0
+    // is always "New". Any subsequent SOM=0 → EOM>0 is a reactivation (Upgrade).
+    const orgEverHadArr = new Set()
+    const out = []
+    for (let mi = 0; mi < allMonths.length; mi++) {
+      const monthKey = allMonths[mi]
+      const nextMonthKey = mi + 1 < allMonths.length ? allMonths[mi + 1] : null
+      const isCurrentMonth = monthKey === currentMonthKey
+
+      for (const orgKey of allOrgs) {
+        const som = ARR_waterfall_num_(somByOrgMonth.get(orgKey + '|' + monthKey) || 0)
+
+        // EOM = next month's day-1 value, or latest snapshot for current/incomplete months
+        // If no day-1 snapshot exists for next month, fall back to latest snapshot in this month
+        let eom
+        if (isCurrentMonth) {
+          const latest = latestByOrgMonth.get(orgKey + '|' + monthKey)
+          eom = latest ? ARR_waterfall_num_(latest.eom) : 0
+        } else if (nextMonthKey && somByOrgMonth.has(orgKey + '|' + nextMonthKey)) {
+          eom = ARR_waterfall_num_(somByOrgMonth.get(orgKey + '|' + nextMonthKey))
+        } else {
+          // No day-1 snapshot for next month — fall back to latest snapshot this month
+          const latest = latestByOrgMonth.get(orgKey + '|' + monthKey)
+          eom = latest ? ARR_waterfall_num_(latest.eom) : 0
+        }
+
+        // Skip orgs with no activity this month
+        if (som === 0 && eom === 0) continue
+
+        let newCustomer = 0, upgrade = 0, downgrade = 0, churn = 0
+
+        if (som > 0 && eom === 0) {
+          churn = som
+        } else if (som === 0 && eom > 0) {
+          if (!orgEverHadArr.has(orgKey)) {
+            newCustomer = eom
+          } else {
+            upgrade = eom  // reactivation
+          }
+        } else if (eom > som) {
+          upgrade = eom - som
+        } else if (eom < som && eom > 0) {
+          downgrade = som - eom
+        }
+
+        // Mark org as having had ARR (for future months' New vs Upgrade)
+        if (som > 0 || eom > 0) orgEverHadArr.add(orgKey)
+
+        // Use org metadata for the base columns
+        const meta = orgMeta.get(orgKey) || {}
+        const base = [
+          monthKey, meta.orgId || '', meta.orgName || '', meta.orgCreated || '',
+          meta.firstPayment || '', meta.churnDate || '', meta.cohortMonth || '',
+          meta.paidCohort || '', meta.currentStatus || '', meta.ringBucket || '',
+          meta.planName || '', meta.billingFreq || '', meta.subscriptionStart || ''
+        ]
+        out.push([...base, 'SOM', som])
+        out.push([...base, 'New', newCustomer])
+        out.push([...base, 'Upgrade', upgrade])
+        out.push([...base, 'Downgrade', downgrade])
+        out.push([...base, 'Churn', churn])
+        out.push([...base, 'EOM', eom])
+      }
+    }
+
+    // ── Warn: orgs with ARR last month but missing day-1 snapshot this month ──
+    const prevMonthKey = allMonths.length >= 2 ? allMonths[allMonths.length - 2] : null
+    if (prevMonthKey && currentMonthKey) {
+      const missingDay1 = []
+      for (const orgKey of allOrgs) {
+        // Did this org have EOM > 0 last month?
+        const prevSomKey = orgKey + '|' + prevMonthKey
+        const prevLatest = latestByOrgMonth.get(prevSomKey)
+        if (!prevLatest || prevLatest.eom <= 0) continue
+
+        // Is there a day-1 snapshot for current month?
+        const curSomKey = orgKey + '|' + currentMonthKey
+        if (somByOrgMonth.has(curSomKey)) continue
+
+        const meta = orgMeta.get(orgKey) || {}
+
+        // Skip legit churn — if the org has a churn_date set, $0 SOM is correct
+        // and no backfill is needed. Only alert on orgs still active.
+        if (meta.churnDate) continue
+
+        missingDay1.push({
+          orgId: meta.orgId || orgKey,
+          orgName: meta.orgName || '',
+          lastEom: prevLatest.eom
+        })
       }
 
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'SOM', som
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'Upgrade', upgrade
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'Downgrade', downgrade
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'Churn', churn
-      ])
-      out.push([
-        rec.snapshotDate, rec.orgId, rec.orgName, rec.orgCreated, rec.firstPayment, rec.churnDate,
-        rec.cohortMonth, rec.firstPaymentCohort, rec.currentStatus, rec.planName, rec.billingFreq,
-        rec.subscriptionStart, 'EOM', eom
-      ])
+      if (missingDay1.length) {
+        const lines = missingDay1
+          .sort((a, b) => b.lastEom - a.lastEom)
+          .slice(0, 50)
+          .map(o => `  • ${o.orgName || o.orgId} (${o.orgId}) — last EOM: $${o.lastEom.toLocaleString()}`)
+        const body = [
+          `${missingDay1.length} org(s) had ARR in ${prevMonthKey} but are missing a day-1 snapshot for ${currentMonthKey}.`,
+          '',
+          'This means their SOM will default to $0, which may incorrectly classify them as "New" instead of continuing customers.',
+          '',
+          'Affected orgs (up to 50):',
+          ...lines,
+          '',
+          `Run at: ${new Date().toISOString()}`
+        ].join('\n')
+
+        try {
+          MailApp.sendEmail({
+            to: 'docker@pingassistant.com',
+            subject: `[ARR Waterfall] ${missingDay1.length} org(s) missing day-1 snapshot for ${currentMonthKey}`,
+            body: body
+          })
+        } catch (e) {
+          Logger.log('[render_arr_waterfall_facts] WARNING: failed to send missing-snapshot email: ' + e.message)
+        }
+
+        Logger.log(`[render_arr_waterfall_facts] WARNING: ${missingDay1.length} orgs missing day-1 snapshot for ${currentMonthKey}`)
+      }
     }
 
     outSheet.clearContents()
-    outSheet.getRange(1, 1, 1, 14).setValues([[
-      'snapshot_date',
+    const outHeaders = [
+      'month',
       'org_id',
       'org_name',
       'org_creation_date',
       'first_payment_date',
       'churn_date',
       'sign_up_cohort_month',
-      'first_payment_cohort_month',
+      'paid_cohort_month',
       'current_status',
+      'ring_bucket',
       'plan_name',
       'billing_frequency',
       'subscription_start_date',
       'metric',
       'amount'
-    ]])
+    ]
+    outSheet.getRange(1, 1, 1, outHeaders.length).setValues([outHeaders])
 
     if (out.length) {
+      // Force month column to plain text BEFORE writing so Sheets doesn't auto-convert YYYY-MM to dates
+      outSheet.getRange(2, 1, out.length, 1).setNumberFormat('@')
       batchSetValuesCompat_(outSheet, 2, 1, out, ARR_WATERFALL_CFG.WRITE_CHUNK)
     }
 
     outSheet.setFrozenRows(1)
-    outSheet.autoResizeColumns(1, 14)
+    outSheet.autoResizeColumns(1, outHeaders.length)
 
     const seconds = (new Date() - t0) / 1000
     if (typeof writeSyncLog === 'function') {
@@ -317,4 +468,8 @@ function ARR_waterfall_formatSnapshot_(v, tz) {
 
   if (!d) return String(v || '').trim()
   return Utilities.formatDate(d, tz, ARR_WATERFALL_CFG.SNAPSHOT_FMT)
+}
+
+function ARR_waterfall_normName_(v) {
+  return String(v || '').trim().toLowerCase().replace(/\s+/g, '_')
 }

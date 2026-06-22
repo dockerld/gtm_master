@@ -17,6 +17,7 @@ const ALL_STATS_CFG = {
     CLERK_MEMBERSHIPS: 'raw_clerk_memberships',
     CLERK_ORGS: 'raw_clerk_orgs',
     POSTHOG_USERS: 'raw_posthog_user_metrics',
+    POSTHOG_ORG_SUBSCRIPTIONS: 'raw_posthog_org_subscriptions',
     ARR_SNAPSHOT: 'arr_snapshot',
     ARR_WATERFALL_FACTS: 'arr_waterfall_facts'
   },
@@ -52,6 +53,7 @@ function render_all_stats_view() {
     const shMems = ss.getSheetByName(ALL_STATS_CFG.INPUTS.CLERK_MEMBERSHIPS)
     const shOrgs = ss.getSheetByName(ALL_STATS_CFG.INPUTS.CLERK_ORGS)
     const shPosthog = ss.getSheetByName(ALL_STATS_CFG.INPUTS.POSTHOG_USERS)
+    const shPosthogOrgSubs = ss.getSheetByName(ALL_STATS_CFG.INPUTS.POSTHOG_ORG_SUBSCRIPTIONS)
     const shSnap = ss.getSheetByName(ALL_STATS_CFG.INPUTS.ARR_SNAPSHOT)
     const shWaterfall = ss.getSheetByName(ALL_STATS_CFG.INPUTS.ARR_WATERFALL_FACTS)
 
@@ -67,6 +69,7 @@ function render_all_stats_view() {
     const clerkMems = shMems ? ALLSTATS_readSheetObjects_(shMems, 1) : []
     const clerkOrgs = shOrgs ? ALLSTATS_readSheetObjects_(shOrgs, 1) : []
     const posthogUsers = shPosthog ? ALLSTATS_readSheetObjects_(shPosthog, 1) : []
+    const posthogOrgSubsRows = shPosthogOrgSubs ? ALLSTATS_readSheetObjects_(shPosthogOrgSubs, 1) : []
 
     const indexes = ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers, canonOrgs)
     const orgAggByKey = new Map()
@@ -85,24 +88,27 @@ function render_all_stats_view() {
     const orgs = Array.from(orgAggByKey.values()).map(ALLSTATS_finalizeOrgAgg_)
     const promoRedemptionsByOrgId = ALLSTATS_buildPromoRedemptionByOrgId_(promoRedemptions)
     ALLSTATS_applyPromoEligibilityFromRedemptions_(orgs, promoRedemptionsByOrgId)
+    ALLSTATS_applyTrialExtensionFromCanon_(orgs, canonOrgs)
     orgs.sort((a, b) => {
       if (b.arr_total !== a.arr_total) return b.arr_total - a.arr_total
       return String(a.org_name || '').localeCompare(String(b.org_name || ''))
     })
 
-    const allMetrics = ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(orgSubscriptions, manualBySubId, stripeBySubId)
-    const conversion = ALLSTATS_buildConversionMetrics_(orgs, clerkOrgs)
+    const managedSets = ALLSTATS_buildManagedExclusionSets_(shManual)
+    const allMetrics = ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(orgSubscriptions, manualBySubId, stripeBySubId, managedSets)
+    const conversion = ALLSTATS_buildConversionMetrics_(ss)
 
     const snapRows = shSnap ? ALLSTATS_readSheetObjects_(shSnap, 1) : []
-    const netNew = ALLSTATS_buildNetNewByMonth_(snapRows)
-    const retention = ALLSTATS_buildRetentionMetrics_(snapRows)
-
     const waterfallRows = shWaterfall ? ALLSTATS_readSheetObjects_(shWaterfall, 1) : []
+    const netNew = ALLSTATS_buildNetNewByMonth_(waterfallRows)
+    const retention = ALLSTATS_buildRetentionMetrics_(snapRows, waterfallRows, orgSubscriptions)
+    const subscriptionChurn = ALLSTATS_buildSubscriptionChurnMetrics_(orgSubscriptions, manualBySubId, posthogOrgSubsRows)
     const waterfall = ALLSTATS_buildWaterfallTables_(waterfallRows)
 
     const freeTrialList = ALLSTATS_buildFreeTrialList_(orgs)
     const promoTrialList = ALLSTATS_buildPromoTrialList_(orgs)
     const paidList = ALLSTATS_buildPaidList_(orgs)
+    const seatTypes = ALLSTATS_buildSeatTypeSummary_(canonOrgs, orgSubscriptions, manualBySubId, stripeBySubId)
 
     ALLSTATS_renderAllStatsSheet_(out, {
       generatedAt: new Date(),
@@ -112,11 +118,20 @@ function render_all_stats_view() {
       conversion,
       netNew,
       retention,
+      subscriptionChurn,
       waterfall,
       freeTrialList,
       promoTrialList,
-      paidList
+      paidList,
+      seatTypes
     })
+
+    // Clean up deprecated sheets
+    const deprecatedSheets = ['Seat Audit', 'Conversion Audit', 'arr_subscription_mapping_audit', 'No Login again', 'Promo Audit']
+    for (const name of deprecatedSheets) {
+      const old = ss.getSheetByName(name)
+      if (old) { try { ss.deleteSheet(old) } catch (e) {} }
+    }
 
     const seconds = (new Date() - t0) / 1000
     ALLSTATS_writeSyncLog_('render_all_stats_view', 'ok', stripeRows.length, orgs.length, seconds, '')
@@ -394,6 +409,120 @@ function ALLSTATS_finalizeOrgAgg_(org) {
   }
 }
 
+function ALLSTATS_buildSeatTypeSummary_(canonOrgs, orgSubscriptions, manualBySubId, stripeBySubId) {
+  const LITE_PRODUCT_IDS = new Set([
+    'prod_THnR7uM4okazF7',
+    'prod_TPWj79k7DB190P',
+    'prod_U1vVdZlnpqyrk8',
+    'prod_U1vVKlFs5EGSfo'
+  ])
+
+  const byStage = {
+    paid: { full: 0, lite: 0, fullOrgs: 0, liteOrgs: 0 },
+    intent: { full: 0, lite: 0, fullOrgs: 0, liteOrgs: 0 },
+    trialing: { full: 0, lite: 0, fullOrgs: 0, liteOrgs: 0 }
+  }
+  let fullSeats = 0, liteSeats = 0, fullOrgs = 0, liteOrgs = 0
+  const orgsWithSeats = new Set()
+
+  // Track per-org totals to count orgs correctly
+  const orgFullSeats = new Map()
+  const orgLiteSeats = new Map()
+  const orgStageBucket = new Map()
+
+  ;(orgSubscriptions || []).forEach(r => {
+    const subId =
+      ALLSTATS_str_(r.latest_subscription_id) ||
+      ALLSTATS_str_(r.stripe_subscription_id) ||
+      ALLSTATS_str_(r.subscription_id) ||
+      ALLSTATS_str_(r.id)
+    const manual = subId ? (manualBySubId && manualBySubId.get(subId)) : null
+    if (manual && manual.excludeInternal) return
+
+    const oid = ALLSTATS_str_(r.app_org_id || r.org_id)
+    if (!oid) return
+
+    const status = ALLSTATS_str_(r.status).toLowerCase()
+    const hasFirstPayment = !!ALLSTATS_str_(r.first_payment_at)
+    const hasPaymentMethod = ALLSTATS_toBool_(r.has_payment_method)
+    let bucket = ALLSTATS_bucketFromOrgSubscriptionInfo_(status, hasFirstPayment, hasPaymentMethod)
+    if (!bucket) return
+
+    // Same 100% discount override as ARR summary
+    if (bucket === 'paid') {
+      const discountedYearly = ALLSTATS_num_(r.amount_after_discounts_yearly)
+      const discountedAmount = ALLSTATS_num_(r.amount_after_discounts)
+      const arr = discountedYearly > 0 ? discountedYearly : discountedAmount > 0 ? discountedAmount : 0
+      if (arr < 0.01) {
+        bucket = hasPaymentMethod ? 'intent_to_pay' : 'free_trial'
+      }
+    }
+
+    const seats = ALLSTATS_safeInt_(r.quantity_total)
+    if (seats <= 0) return
+
+    // Determine lite vs full from stripe items_json product_ids
+    const stripeRow = subId ? (stripeBySubId && stripeBySubId.get(subId)) : null
+    let isLite = false
+    let liteSeatsInSub = 0
+    let fullSeatsInSub = 0
+    if (stripeRow) {
+      let items = []
+      try { items = JSON.parse(ALLSTATS_str_(stripeRow.items_json)) || [] } catch (e) { items = [] }
+      if (items.length > 0) {
+        for (const it of items) {
+          const pid = ALLSTATS_str_(it.product_id)
+          const qty = ALLSTATS_safeInt_(it.quantity)
+          if (LITE_PRODUCT_IDS.has(pid)) {
+            liteSeatsInSub += qty
+          } else {
+            fullSeatsInSub += qty
+          }
+        }
+      } else {
+        // No items_json, treat all seats as full
+        fullSeatsInSub = seats
+      }
+    } else {
+      fullSeatsInSub = seats
+    }
+
+    if (!orgFullSeats.has(oid)) orgFullSeats.set(oid, 0)
+    if (!orgLiteSeats.has(oid)) orgLiteSeats.set(oid, 0)
+
+    orgFullSeats.set(oid, orgFullSeats.get(oid) + fullSeatsInSub)
+    orgLiteSeats.set(oid, orgLiteSeats.get(oid) + liteSeatsInSub)
+
+    // Keep highest priority bucket per org
+    const rank = { paid: 3, intent_to_pay: 2, free_trial: 1 }
+    const existing = orgStageBucket.get(oid)
+    if (!existing || (rank[bucket] || 0) > (rank[existing] || 0)) {
+      orgStageBucket.set(oid, bucket)
+    }
+  })
+
+  // Aggregate per-org totals into stage breakdowns
+  const allOrgIds = new Set([...orgFullSeats.keys(), ...orgLiteSeats.keys()])
+  for (const oid of allOrgIds) {
+    const full = orgFullSeats.get(oid) || 0
+    const lite = orgLiteSeats.get(oid) || 0
+    const stage = orgStageBucket.get(oid)
+
+    if (full > 0) { fullSeats += full; fullOrgs += 1; orgsWithSeats.add(oid) }
+    if (lite > 0) { liteSeats += lite; liteOrgs += 1; orgsWithSeats.add(oid) }
+
+    const stageBucket = stage === 'paid' ? byStage.paid
+      : stage === 'intent_to_pay' ? byStage.intent
+      : (stage === 'free_trial' ? byStage.trialing : null)
+    if (stageBucket) {
+      if (full > 0) { stageBucket.full += full; stageBucket.fullOrgs += 1 }
+      if (lite > 0) { stageBucket.lite += lite; stageBucket.liteOrgs += 1 }
+    }
+  }
+
+  return { fullSeats, liteSeats, fullOrgs, liteOrgs, totalOrgsWithSeats: orgsWithSeats.size, byStage }
+}
+
 function ALLSTATS_buildStageMetrics_(orgs) {
   const out = {
     paidDefined: ALLSTATS_emptyMetric_(),
@@ -516,7 +645,8 @@ function ALLSTATS_buildStageMetrics_(orgs) {
   return out
 }
 
-function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId, stripeBySubId) {
+function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId, stripeBySubId, managedSets) {
+  const managed = managedSets || { subIds: new Set(), customerIds: new Set() }
   const out = {
     paidDefined: ALLSTATS_emptyMetric_(),
     promoTrialDefined: ALLSTATS_emptyMetric_(),
@@ -531,7 +661,9 @@ function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId,
     stagePromo: { firms: 0, seats: 0 },
     stageFree: { firms: 0, seats: 0 },
     paidStageTotals: { arr: 0, seats: 0, firms: 0 },
+    paidStageTotalsExclManaged: { arr: 0, seats: 0, firms: 0 },
     avgRevenuePerFirmPaid: 0,
+    avgRevenuePerFirmPaidExclManaged: 0,
     avgRevenuePerSeat: 0,
     avgSeatCountPerFirmPaid: 0
   }
@@ -545,53 +677,62 @@ function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId,
     const manual = subId ? (manualBySubId && manualBySubId.get(subId)) : null
     if (manual && manual.excludeInternal) return
 
+    const custId = ALLSTATS_str_(r.stripe_customer_id)
+    const isManaged = (subId && managed.subIds.has(subId)) ||
+                      (custId && managed.customerIds.has(custId))
+
     const status = ALLSTATS_str_(r.status).toLowerCase()
     const hasFirstPayment = !!ALLSTATS_str_(r.first_payment_at)
     const hasPaymentMethod = ALLSTATS_toBool_(r.has_payment_method)
-    const bucket = ALLSTATS_bucketFromOrgSubscriptionInfo_(status, hasFirstPayment, hasPaymentMethod)
+    let bucket = ALLSTATS_bucketFromOrgSubscriptionInfo_(status, hasFirstPayment, hasPaymentMethod)
     if (!bucket) return
 
-    const amountYearly = ALLSTATS_num_(r.amount_yearly)
-    const amount = ALLSTATS_num_(r.amount)
     const interval = ALLSTATS_str_(r.interval).toLowerCase()
     const intervalCount = Math.max(1, ALLSTATS_num_(r.interval_count) || 1)
-    const arrBase = amountYearly > 0
-      ? amountYearly
-      : ALLSTATS_computeMrrArr_(amount, interval, intervalCount).arr
-    let arr = arrBase
-    let mrr = arr / 12
     const seats = ALLSTATS_safeInt_(r.quantity_total)
 
-    if (bucket === 'paid') {
-      const stripeRow = subId ? (stripeBySubId && stripeBySubId.get(subId)) : null
-      if (stripeRow) {
-        const rawInterval = ALLSTATS_str_(stripeRow.interval).toLowerCase()
-        const rawIntervalCount = Math.max(1, ALLSTATS_num_(stripeRow.interval_count) || 1)
-        const rawAmount = ALLSTATS_moneyAmount_(stripeRow.amount)
-        const discountCtx = ALLSTATS_buildDiscountContextNow_(stripeRow, {
-          amountRaw: rawAmount,
-          interval: rawInterval,
-          intervalCount: rawIntervalCount,
-          asOfDate: new Date()
-        })
-        const paidMrrArr = ALLSTATS_computeMrrArr_(discountCtx.amount, rawInterval, rawIntervalCount)
-        arr = paidMrrArr.arr
-        mrr = paidMrrArr.mrr
-      }
+    // ── Single source of truth: discount-adjusted ARR from org_subscription_info (same as Ring) ──
+    const discountedYearly = ALLSTATS_num_(r.amount_after_discounts_yearly)
+    const discountedAmount = ALLSTATS_num_(r.amount_after_discounts)
+    const arr = discountedYearly > 0
+      ? discountedYearly
+      : discountedAmount > 0
+        ? ALLSTATS_computeMrrArr_(discountedAmount, interval, intervalCount).arr
+        : 0
+
+    // Gross (pre-discount) ARR for 100%-off reclassification
+    const grossYearly = ALLSTATS_num_(r.amount_yearly)
+    const grossAmount = ALLSTATS_num_(r.amount)
+    const grossArr = grossYearly > 0
+      ? grossYearly
+      : ALLSTATS_computeMrrArr_(grossAmount, interval, intervalCount).arr
+
+    // ── 100% discount override (same as Ring) ──
+    let bucketArr = arr
+    if (bucket === 'paid' && arr < 0.01) {
+      bucket = hasPaymentMethod ? 'intent_to_pay' : 'free_trial'
+      bucketArr = grossArr
     }
 
+    const mrr = bucketArr / 12
+
     if (bucket === 'paid') {
-      out.paidDefined.arr += arr
+      out.paidDefined.arr += bucketArr
       out.paidDefined.mrr += mrr
       out.paidDefined.firms += 1
       out.paidDefined.seats += seats
+      if (!isManaged) {
+        out.paidStageTotalsExclManaged.arr += bucketArr
+        out.paidStageTotalsExclManaged.seats += seats
+        out.paidStageTotalsExclManaged.firms += 1
+      }
     } else if (bucket === 'intent_to_pay') {
-      out.promoTrialDefined.arr += arr
+      out.promoTrialDefined.arr += bucketArr
       out.promoTrialDefined.mrr += mrr
       out.promoTrialDefined.firms += 1
       out.promoTrialDefined.seats += seats
     } else if (bucket === 'free_trial') {
-      out.freeTrialDefined.arr += arr
+      out.freeTrialDefined.arr += bucketArr
       out.freeTrialDefined.mrr += mrr
       out.freeTrialDefined.firms += 1
       out.freeTrialDefined.seats += seats
@@ -616,6 +757,10 @@ function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId,
     ? (out.paidStageTotals.arr / out.paidStageTotals.seats)
     : 0
 
+  out.avgRevenuePerFirmPaidExclManaged = out.paidStageTotalsExclManaged.firms
+    ? (out.paidStageTotalsExclManaged.arr / out.paidStageTotalsExclManaged.firms)
+    : 0
+
   out.avgSeatCountPerFirmPaid = out.paidStageTotals.firms
     ? (out.paidStageTotals.seats / out.paidStageTotals.firms)
     : 0
@@ -623,10 +768,28 @@ function ALLSTATS_buildStageMetricsFromOrgSubscriptionInfo_(rows, manualBySubId,
   return out
 }
 
+function ALLSTATS_buildManagedExclusionSets_(shManual) {
+  const subIds = new Set()
+  const customerIds = new Set()
+  if (!shManual) return { subIds, customerIds }
+  const rows = ALLSTATS_readSheetObjects_(shManual, 1)
+  for (const r of rows) {
+    const reason = ALLSTATS_str_(r.exclude_reason).toLowerCase()
+    if (reason !== 'managed') continue
+    const subId = ALLSTATS_str_(r.subscription_id || r.stripe_subscription_id || r.subscription)
+    if (subId) subIds.add(subId)
+    const custId = ALLSTATS_str_(r.customer_id || r.stripe_customer_id)
+    if (custId) customerIds.add(custId)
+  }
+  return { subIds, customerIds }
+}
+
 function ALLSTATS_bucketFromOrgSubscriptionInfo_(status, hasFirstPayment, hasPaymentMethod) {
+  // Same logic as Ring: ringBucketFromOrgSubscriptionInfo_
   if (status === 'active' && hasFirstPayment) return 'paid'
-  if (status === 'active' && !hasFirstPayment) return 'intent_to_pay'
+  if (status === 'active' && !hasFirstPayment && hasPaymentMethod) return 'intent_to_pay'
   if (status === 'trialing' && hasPaymentMethod) return 'intent_to_pay'
+  if (status === 'active' && !hasFirstPayment && !hasPaymentMethod) return 'free_trial'
   if (status === 'trialing' && !hasPaymentMethod) return 'free_trial'
   return ''
 }
@@ -649,39 +812,34 @@ function ALLSTATS_emptyMetric_() {
   return { arr: 0, mrr: 0, firms: 0, seats: 0 }
 }
 
-function ALLSTATS_buildConversionMetrics_(orgs, clerkOrgs) {
-  const totalSignedUp = new Set((clerkOrgs || [])
-    .map(o => ALLSTATS_str_(o.org_id))
-    .filter(Boolean)
-  ).size
+function ALLSTATS_buildConversionMetrics_(ss) {
+  // Uses shared canon_orgs-based org list (filtered, enriched with first_payment_at)
+  const convOrgs = buildConversionOrgList_(ss)
 
+  let totalSignedUp = 0
   let paidUs = 0
   let signupTrialPotential = 0
   let promoPool = 0
   let promoToPaid = 0
   let promoTrialPotential = 0
 
-  for (const o of orgs) {
-    const inTrialNow = !!(o.has_free || o.has_promo)
-    const hasFirstPayment = !!o.has_paid_us
-    const isActiveNoFirstPayment = !!(o.has_paid && !hasFirstPayment)
-    const hasAnyPromoUsage =
-      !!o.has_promo_conversion_eligible ||
-      !!o.has_promo_evidence ||
-      !!o.has_free_promo_evidence ||
-      !!ALLSTATS_str_(o.promo_codes_text) ||
-      !!ALLSTATS_str_(o.promo_redemption_codes_text) ||
-      !!ALLSTATS_str_(o.promo_redemption_code_ids_text) ||
-      Number(o.promo_redemption_count || 0) > 0
+  for (const org of convOrgs) {
+    totalSignedUp += 1
 
-    if (o.has_paid_us) paidUs += 1
-    else if (inTrialNow) signupTrialPotential += 1
+    if (org.first_payment_at) {
+      paidUs += 1
+    }
+    if (org.is_currently_trialing) {
+      signupTrialPotential += 1
+    }
 
-    const inPromoPool = isActiveNoFirstPayment || hasAnyPromoUsage
-    if (inPromoPool) {
+    if (org.has_promo) {
       promoPool += 1
-      if (o.has_paid_us) promoToPaid += 1
-      else promoTrialPotential += 1
+      if (org.first_payment_at) {
+        promoToPaid += 1
+      } else if (org.is_currently_trialing) {
+        promoTrialPotential += 1
+      }
     }
   }
 
@@ -693,15 +851,21 @@ function ALLSTATS_buildConversionMetrics_(orgs, clerkOrgs) {
     ? ((promoToPaid + promoTrialPotential) / promoPool)
     : 0
 
+  // Denominator excludes orgs still trialing — only count orgs whose trial resolved
+  const signupResolved = totalSignedUp - signupTrialPotential
+  const promoResolved = promoPool - promoTrialPotential
+
   return {
     totalSignedUp,
+    signupResolved,
     paidUs,
-    signupToPaidRate: totalSignedUp ? (paidUs / totalSignedUp) : 0,
+    signupToPaidRate: signupResolved ? (paidUs / signupResolved) : 0,
     signupTrialPotential,
     signupPotentialMaxRate,
     promoPool,
+    promoResolved,
     promoToPaid,
-    promoToPaidRate: promoPool ? (promoToPaid / promoPool) : 0,
+    promoToPaidRate: promoResolved ? (promoToPaid / promoResolved) : 0,
     promoTrialPotential,
     promoPotentialMaxRate
   }
@@ -807,18 +971,37 @@ function ALLSTATS_applyPromoEligibilityFromRedemptions_(orgs, promoRedemptionsBy
   }
 }
 
-function ALLSTATS_buildNetNewByMonth_(snapshotRows) {
+function ALLSTATS_applyTrialExtensionFromCanon_(orgs, canonOrgs) {
+  const canonByOrgId = new Map()
+  for (const c of (canonOrgs || [])) {
+    const oid = ALLSTATS_str_(c.app_org_id || c.org_id)
+    if (oid) canonByOrgId.set(oid, c)
+  }
+  for (const org of (orgs || [])) {
+    const orgId = ALLSTATS_str_(org.org_id)
+    if (!orgId) continue
+    const canon = canonByOrgId.get(orgId)
+    if (!canon) continue
+    const extended = ALLSTATS_str_(canon.trial_extended).toLowerCase() === 'true'
+    if (extended) {
+      org.has_promo = true
+      org.has_promo_conversion_eligible = true
+      const src = ALLSTATS_str_(canon.trial_extension_source)
+      if (src.includes('stripe_manual')) org.has_manual_trial_extension = true
+    }
+  }
+}
+
+function ALLSTATS_buildNetNewByMonth_(waterfallRows) {
+  // Aggregate arr_waterfall_facts (per-org-per-month metrics) into monthly totals
   const byMonth = new Map()
 
-  for (const r of (snapshotRows || [])) {
-    const snapDate = ALLSTATS_toDateOrNull_(r.snapshot_date)
-    if (!snapDate) continue
-
-    const monthKey = Utilities.formatDate(snapDate, 'UTC', 'yyyy-MM')
-    const bom = ALLSTATS_num_(r.bom_arr)
-    const eomRaw = (r.eom_arr !== '' && r.eom_arr != null) ? r.eom_arr : r.total_arr
-    const eom = ALLSTATS_num_(eomRaw)
-    const delta = eom - bom
+  for (const r of (waterfallRows || [])) {
+    const monthKey = ALLSTATS_str_(r.month)
+    const metric = ALLSTATS_str_(r.metric)
+    const amount = ALLSTATS_num_(r.amount)
+    const orgId = ALLSTATS_str_(r.org_id)
+    if (!monthKey || !metric) continue
 
     if (!byMonth.has(monthKey)) {
       byMonth.set(monthKey, {
@@ -835,58 +1018,93 @@ function ALLSTATS_buildNetNewByMonth_(snapshotRows) {
     }
 
     const b = byMonth.get(monthKey)
-    b.bom_arr += bom
-    b.eom_arr += eom
-    b.net_new_arr += delta
+    if (metric === 'SOM') b.bom_arr += amount
+    else if (metric === 'EOM') b.eom_arr += amount
+    else if (metric === 'New') { b.upgrades += amount; b.new_orgs += 1 }
+    else if (metric === 'Upgrade') b.upgrades += amount
+    else if (metric === 'Downgrade') b.downgrades += amount
+    else if (metric === 'Churn') { b.churn_arr += Math.abs(amount); b.churned_orgs += 1 }
+  }
 
-    if (bom <= 0 && eom > 0) b.new_orgs += 1
-    if (delta > 0) b.upgrades += delta
-    if (delta < 0) b.downgrades += Math.abs(delta)
-    if (bom > 0 && eom <= 0) {
-      b.churned_orgs += 1
-      b.churn_arr += bom
-    }
+  for (const b of byMonth.values()) {
+    b.net_new_arr = b.eom_arr - b.bom_arr
   }
 
   const rows = Array.from(byMonth.values()).sort((a, b) => String(a.month).localeCompare(String(b.month)))
   return { rows }
 }
 
-function ALLSTATS_buildRetentionMetrics_(snapshotRows) {
-  const byDate = new Map()
-
-  for (const r of (snapshotRows || [])) {
-    const d = ALLSTATS_toDateOrNull_(r.snapshot_date)
-    if (!d) continue
-    const key = Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd')
-
-    if (!byDate.has(key)) byDate.set(key, [])
-
-    const bom = ALLSTATS_num_(r.bom_arr)
-    const eomRaw = (r.eom_arr !== '' && r.eom_arr != null) ? r.eom_arr : r.total_arr
-    const eom = ALLSTATS_num_(eomRaw)
-
-    byDate.get(key).push({ bom, eom })
+function ALLSTATS_buildRetentionMetrics_(snapshotRows, waterfallRows, orgSubscriptions) {
+  const emptyResult = {
+    latest_snapshot: '',
+    base_bom_arr: 0,
+    base_orgs: 0,
+    nrr: 0,
+    grr: 0,
+    logo_churn_rate: 0,
+    gross_arr_churn_rate: 0,
+    full_arr_churn_rate: 0,
+    churned_orgs: 0,
+    churned_arr: 0,
+    churned_orgs_list: [],
+    churned_orgs_list_all: []
   }
 
-  const keys = Array.from(byDate.keys()).sort()
-  if (!keys.length) {
-    return {
-      latest_snapshot: '',
-      base_bom_arr: 0,
-      base_orgs: 0,
-      nrr: 0,
-      grr: 0,
-      logo_churn_rate: 0,
-      gross_arr_churn_rate: 0,
-      full_arr_churn_rate: 0,
-      churned_orgs: 0,
-      churned_arr: 0
-    }
+  // Use arr_waterfall_facts which already has per-org SOM/EOM/Churn per month
+  if (!waterfallRows || !waterfallRows.length) return emptyResult
+
+  // Group waterfall rows by month + org
+  const byMonthOrg = new Map()
+  const allMonths = new Set()
+
+  for (const r of waterfallRows) {
+    const month = ALLSTATS_str_(r.month)
+    const orgId = ALLSTATS_str_(r.org_id)
+    const metric = ALLSTATS_str_(r.metric)
+    const amount = ALLSTATS_num_(r.amount)
+    if (!month || !orgId || !metric) continue
+
+    allMonths.add(month)
+    const key = month + '|' + orgId
+    if (!byMonthOrg.has(key)) byMonthOrg.set(key, {})
+    byMonthOrg.get(key)[metric] = amount
   }
 
-  const latestKey = keys[keys.length - 1]
-  const rows = byDate.get(latestKey) || []
+  const monthsSorted = [...allMonths].sort()
+  if (!monthsSorted.length) return emptyResult
+
+  // Use the latest completed month (second to last) if available, otherwise latest
+  // The latest month is likely the current (incomplete) month
+  const latestMonth = monthsSorted.length >= 2
+    ? monthsSorted[monthsSorted.length - 2]
+    : monthsSorted[monthsSorted.length - 1]
+
+  // Also collect org metadata from waterfall rows for the audit
+  const orgMeta = new Map()
+  for (const r of waterfallRows) {
+    const orgId = ALLSTATS_str_(r.org_id)
+    if (!orgId || orgMeta.has(orgId)) continue
+    orgMeta.set(orgId, {
+      org_id: orgId,
+      org_name: ALLSTATS_str_(r.org_name),
+      current_status: ALLSTATS_str_(r.current_status),
+      ring_bucket: ALLSTATS_str_(r.ring_bucket),
+      first_payment_date: ALLSTATS_str_(r.first_payment_date),
+      churn_date: ALLSTATS_str_(r.churn_date),
+      plan_name: ALLSTATS_str_(r.plan_name)
+    })
+  }
+
+  // Stripe lookup metadata by org for audit debugging fields
+  const stripeMetaByOrg = new Map()
+  for (const r of (orgSubscriptions || [])) {
+    const orgId = ALLSTATS_str_(r.app_org_id || r.org_id)
+    if (!orgId || stripeMetaByOrg.has(orgId)) continue
+    stripeMetaByOrg.set(orgId, {
+      stripe_customer_email: ALLSTATS_str_(r.customer_email || r.billing_email || r.email),
+      stripe_subscription_id: ALLSTATS_str_(r.stripe_subscription_id || r.latest_subscription_id || r.subscription_id)
+    })
+  }
 
   let baseBom = 0
   let baseEom = 0
@@ -895,20 +1113,70 @@ function ALLSTATS_buildRetentionMetrics_(snapshotRows) {
   let fullChurnArr = 0
   let baseOrgs = 0
   let churnedOrgs = 0
+  const churnedOrgsList = []
+  const churnedOrgsAllByOrg = new Map()
 
-  for (const r of rows) {
-    if (r.bom <= 0) continue
+  for (const [key, metrics] of byMonthOrg) {
+    const month = key.split('|')[0]
+    const orgId = key.split('|')[1]
+    const som = ALLSTATS_num_(metrics.SOM)
+    const eom = ALLSTATS_num_(metrics.EOM)
+    if (som <= 0) continue  // only count orgs that had ARR at start of month
+    const meta = orgMeta.get(orgId) || {}
+    const status = ALLSTATS_str_(meta.current_status).toLowerCase()
+    const hasCancelSignal = !!ALLSTATS_str_(meta.churn_date) || status === 'canceled' || status === 'cancelled'
+
+    // All-time churn audit list (unique orgs, keep most recent churn month)
+    if (eom <= 0 && hasCancelSignal) {
+      const existing = churnedOrgsAllByOrg.get(orgId)
+      if (!existing || String(month) > String(existing.churn_month || '')) {
+        const stripeMeta = stripeMetaByOrg.get(orgId) || {}
+        churnedOrgsAllByOrg.set(orgId, {
+          org_id: orgId,
+          org_name: meta.org_name || '',
+          stripe_customer_email: stripeMeta.stripe_customer_email || '',
+          stripe_subscription_id: stripeMeta.stripe_subscription_id || '',
+          churn_month: month || '',
+          som_arr: som,
+          eom_arr: eom,
+          current_status: meta.current_status || '',
+          ring_bucket: meta.ring_bucket || '',
+          first_payment_date: meta.first_payment_date || '',
+          churn_date: meta.churn_date || '',
+          plan_name: meta.plan_name || ''
+        })
+      }
+    }
+
+    // Latest month churn metrics used in Conversion + Retention section
+    if (month !== latestMonth) continue
+
     baseOrgs += 1
-    baseBom += r.bom
-    baseEom += r.eom
-    retainedEomNoExpansion += Math.min(r.bom, r.eom)
+    baseBom += som
+    baseEom += eom
+    retainedEomNoExpansion += Math.min(som, eom)
 
-    const loss = Math.max(0, r.bom - r.eom)
+    const loss = Math.max(0, som - eom)
     grossLoss += loss
 
-    if (r.eom <= 0) {
+    // Churned org definition: paid at SOM, then canceled to zero ARR by EOM.
+    if (eom <= 0 && hasCancelSignal) {
       churnedOrgs += 1
-      fullChurnArr += r.bom
+      fullChurnArr += som
+      const stripeMeta = stripeMetaByOrg.get(orgId) || {}
+      churnedOrgsList.push({
+        org_id: orgId,
+        org_name: meta.org_name || '',
+        stripe_customer_email: stripeMeta.stripe_customer_email || '',
+        stripe_subscription_id: stripeMeta.stripe_subscription_id || '',
+        som_arr: som,
+        eom_arr: eom,
+        current_status: meta.current_status || '',
+        ring_bucket: meta.ring_bucket || '',
+        first_payment_date: meta.first_payment_date || '',
+        churn_date: meta.churn_date || '',
+        plan_name: meta.plan_name || ''
+      })
     }
   }
 
@@ -917,9 +1185,14 @@ function ALLSTATS_buildRetentionMetrics_(snapshotRows) {
   const logoChurnRate = baseOrgs > 0 ? (churnedOrgs / baseOrgs) : 0
   const grossArrChurnRate = baseBom > 0 ? (grossLoss / baseBom) : 0
   const fullArrChurnRate = baseBom > 0 ? (fullChurnArr / baseBom) : 0
+  const churnedOrgsListAll = Array.from(churnedOrgsAllByOrg.values()).sort((a, b) => {
+    const monthCmp = String(b.churn_month || '').localeCompare(String(a.churn_month || ''))
+    if (monthCmp !== 0) return monthCmp
+    return String(a.org_name || '').localeCompare(String(b.org_name || ''))
+  })
 
   return {
-    latest_snapshot: latestKey,
+    latest_snapshot: latestMonth,
     base_bom_arr: baseBom,
     base_orgs: baseOrgs,
     nrr,
@@ -928,7 +1201,9 @@ function ALLSTATS_buildRetentionMetrics_(snapshotRows) {
     gross_arr_churn_rate: grossArrChurnRate,
     full_arr_churn_rate: fullArrChurnRate,
     churned_orgs: churnedOrgs,
-    churned_arr: fullChurnArr
+    churned_arr: fullChurnArr,
+    churned_orgs_list: churnedOrgsList,
+    churned_orgs_list_all: churnedOrgsListAll
   }
 }
 
@@ -945,7 +1220,7 @@ function ALLSTATS_buildWaterfallTables_(rows) {
 
     parsed.push({
       date_key: dateKey,
-      cohort: ALLSTATS_str_(r.cohort_month_trial) || '(blank)',
+      cohort: ALLSTATS_str_(r.sign_up_cohort_month) || ALLSTATS_str_(r.paid_cohort_month) || '(blank)',
       org_id: ALLSTATS_str_(r.org_id),
       org_name: ALLSTATS_str_(r.org_name),
       metric,
@@ -984,9 +1259,171 @@ function ALLSTATS_buildWaterfallTables_(rows) {
   return { latest_snapshot: latest, byCohort, byOrg }
 }
 
+function ALLSTATS_buildSubscriptionChurnMetrics_(orgSubscriptions, manualBySubId, posthogOrgSubsRows) {
+  const ACTIVE_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid'])
+  const byOrg = new Map()
+  const activeSubCountByOrg = new Map()
+  const activeSubIdsByOrg = new Map()
+  const latestPosthogSubById = new Map()
+  const nowMs = Date.now()
+  const staleGraceMs = 2 * 24 * 60 * 60 * 1000
+
+  for (const r of (posthogOrgSubsRows || [])) {
+    const orgId = ALLSTATS_str_(r.app_org_id || r.org_id)
+    if (!orgId) continue
+
+    const subId =
+      ALLSTATS_str_(r.stripe_subscription_id) ||
+      ALLSTATS_str_(r.subscription_id) ||
+      ALLSTATS_str_(r.id)
+    if (!subId) continue
+    const status = ALLSTATS_str_(r.status).toLowerCase()
+    const currentPeriodEnd = ALLSTATS_str_(r.current_period_end)
+    const updatedTs = ALLSTATS_toDateOrNull_(r.updated_at || r.pulled_at || r.created_at || r.current_period_end)
+    const ts = updatedTs ? updatedTs.getTime() : 0
+
+    const prev = latestPosthogSubById.get(subId)
+    if (!prev || ts >= prev.ts) {
+      latestPosthogSubById.set(subId, {
+        org_id: orgId,
+        sub_id: subId,
+        status,
+        current_period_end: currentPeriodEnd,
+        ts
+      })
+    }
+  }
+
+  for (const rec of latestPosthogSubById.values()) {
+    const manual = rec.sub_id ? (manualBySubId && manualBySubId.get(rec.sub_id)) : null
+    if (manual && manual.excludeInternal) continue
+    if (!ACTIVE_STATUSES.has(rec.status)) continue
+
+    // Ignore stale "active" rows whose period end is already in the past.
+    const cpe = ALLSTATS_toDateOrNull_(rec.current_period_end)
+    if (cpe && cpe.getTime() < (nowMs - staleGraceMs)) continue
+
+    activeSubCountByOrg.set(rec.org_id, (activeSubCountByOrg.get(rec.org_id) || 0) + 1)
+    if (!activeSubIdsByOrg.has(rec.org_id)) activeSubIdsByOrg.set(rec.org_id, [])
+    activeSubIdsByOrg.get(rec.org_id).push(rec.sub_id)
+  }
+
+  for (const r of (orgSubscriptions || [])) {
+    const orgId = ALLSTATS_str_(r.app_org_id || r.org_id)
+    if (!orgId) continue
+
+    const subId =
+      ALLSTATS_str_(r.stripe_subscription_id) ||
+      ALLSTATS_str_(r.latest_subscription_id) ||
+      ALLSTATS_str_(r.subscription_id)
+    const manual = subId ? (manualBySubId && manualBySubId.get(subId)) : null
+    if (manual && manual.excludeInternal) continue
+
+    const row = {
+      org_id: orgId,
+      org_name: ALLSTATS_str_(r.org_name),
+      stripe_customer_email: ALLSTATS_str_(r.customer_email || r.billing_email || r.email),
+      stripe_subscription_id: subId,
+      status: ALLSTATS_str_(r.status).toLowerCase(),
+      first_payment_date: ALLSTATS_str_(r.first_payment_at),
+      churn_date: ALLSTATS_str_(r.churn_date),
+      churn_reason: ALLSTATS_str_(r.churn_reason || r.cancellation_reason),
+      arr_yearly: (() => {
+        const discounted = ALLSTATS_num_(r.amount_after_discounts_yearly)
+        const gross = ALLSTATS_num_(r.amount_yearly)
+        return discounted > 0 ? discounted : gross
+      })(),
+      seat_count: ALLSTATS_safeInt_(r.quantity_total),
+      current_period_end: ALLSTATS_str_(r.current_period_end),
+      cancel_at_period_end: ALLSTATS_toBool_(r.cancel_at_period_end),
+      plan_name: ALLSTATS_str_(r.plan_name),
+      subscription_created_at: ALLSTATS_str_(r.subscription_created_at_date)
+    }
+
+    const existing = byOrg.get(orgId)
+    if (!existing) {
+      byOrg.set(orgId, row)
+      continue
+    }
+
+    const existingTs = ALLSTATS_toDateOrNull_(existing.subscription_created_at)
+    const rowTs = ALLSTATS_toDateOrNull_(row.subscription_created_at)
+    if (rowTs && (!existingTs || rowTs.getTime() > existingTs.getTime())) byOrg.set(orgId, row)
+  }
+
+  let paidBaseOrgs = 0
+  let churnedOrgs = 0
+  let canceledOrgs = 0
+  let scheduledOrgs = 0
+  let churnedArr = 0
+  let churnedSeats = 0
+  const rows = []
+
+  for (const r of byOrg.values()) {
+    const hasPaid = !!r.first_payment_date
+    if (!hasPaid) continue
+    paidBaseOrgs += 1
+
+    const activeSubCount = activeSubCountByOrg.get(r.org_id) || 0
+    const hasAnyActiveSub = activeSubCount > 0
+    const isCanceledNow = r.status === 'canceled' || r.status === 'cancelled'
+    const churnEffectiveDate = r.churn_date || r.current_period_end || ''
+    const isScheduledCancel = !isCanceledNow && r.cancel_at_period_end && !!churnEffectiveDate
+    const isTrulyChurned = !hasAnyActiveSub && (isCanceledNow || (!!r.churn_date && !r.cancel_at_period_end))
+    const isChurnRisk = isTrulyChurned || isScheduledCancel
+    if (!isChurnRisk) continue
+
+    churnedOrgs += 1
+    if (isTrulyChurned) canceledOrgs += 1
+    if (isScheduledCancel) scheduledOrgs += 1
+    churnedArr += ALLSTATS_num_(r.arr_yearly)
+    churnedSeats += ALLSTATS_safeInt_(r.seat_count)
+
+    rows.push({
+      org_id: r.org_id,
+      org_name: r.org_name,
+      stripe_customer_email: r.stripe_customer_email,
+      stripe_subscription_id: r.stripe_subscription_id,
+      status: r.status,
+      active_subscription_count: activeSubCount,
+      active_subscription_ids: (activeSubIdsByOrg.get(r.org_id) || []).join(', '),
+      churn_type: isTrulyChurned ? 'canceled' : 'scheduled_cancel',
+      churn_reason: r.churn_reason || (isScheduledCancel ? 'cancel_at_period_end' : (isTrulyChurned ? 'canceled' : '')),
+      churn_effective_date: churnEffectiveDate,
+      subscription_end_date: isTrulyChurned ? churnEffectiveDate : (r.current_period_end || churnEffectiveDate || ''),
+      current_period_end: r.current_period_end || '',
+      first_payment_date: r.first_payment_date,
+      seat_count: ALLSTATS_safeInt_(r.seat_count),
+      arr_yearly: ALLSTATS_num_(r.arr_yearly),
+      plan_name: r.plan_name
+    })
+  }
+
+  rows.sort((a, b) => {
+    const da = ALLSTATS_toDateOrNull_(a.churn_effective_date)
+    const db = ALLSTATS_toDateOrNull_(b.churn_effective_date)
+    const ta = da ? da.getTime() : 0
+    const tb = db ? db.getTime() : 0
+    if (tb !== ta) return tb - ta
+    return String(a.org_name || '').localeCompare(String(b.org_name || ''))
+  })
+
+  return {
+    paid_base_orgs: paidBaseOrgs,
+    churned_orgs: churnedOrgs,
+    canceled_orgs: canceledOrgs,
+    scheduled_churn_orgs: scheduledOrgs,
+    churned_arr: churnedArr,
+    churned_seats: churnedSeats,
+    logo_churn_rate: paidBaseOrgs > 0 ? (churnedOrgs / paidBaseOrgs) : 0,
+    rows
+  }
+}
+
 function ALLSTATS_emptyWaterfallBucket_(base) {
   return Object.assign({}, base || {}, {
     som: 0,
+    new_customer: 0,
     upgrade: 0,
     downgrade: 0,
     churn: 0,
@@ -998,6 +1435,7 @@ function ALLSTATS_addMetricToWaterfallBucket_(bucket, metric, amount) {
   if (!bucket) return
   const m = String(metric || '').toLowerCase()
   if (m === 'som') bucket.som += amount
+  else if (m === 'new') bucket.new_customer += amount
   else if (m === 'upgrade') bucket.upgrade += amount
   else if (m === 'downgrade') bucket.downgrade += amount
   else if (m === 'churn') bucket.churn += amount
@@ -1076,6 +1514,7 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
   row = ALLSTATS_writeTitle_(sheet, row, 'All the Stats', data.generatedAt)
 
   row = ALLSTATS_writeSection_(sheet, row, 'ARR / MRR Summary (Org Level)')
+  const arrSummaryRow = row
   row = ALLSTATS_writeTable_(sheet, row, 1,
     ['Metric', 'Paid', 'Intent to Pay', 'Trialing'],
     [
@@ -1088,6 +1527,24 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
       currencyRowsAcross: [1, 2],
       intRowsAcross: [3, 4]
     }
+  )
+
+  // Seat breakdown by type and stage — placed to the right of ARR summary
+  const seatCol = 6
+  const bs = data.seatTypes.byStage
+  const paidTotal = bs.paid.full + bs.paid.lite
+  const intentTotal = bs.intent.full + bs.intent.lite
+  const trialingTotal = bs.trialing.full + bs.trialing.lite
+  ALLSTATS_writeTable_(sheet, arrSummaryRow, seatCol,
+    ['Seat Type', 'Paid', 'Intent to Pay', 'Trialing'],
+    [
+      ['Full Seats', bs.paid.full, bs.intent.full, bs.trialing.full],
+      ['Lite Seats', bs.paid.lite, bs.intent.lite, bs.trialing.lite],
+      ['Total', paidTotal, intentTotal, trialingTotal],
+      ['% Full', paidTotal ? bs.paid.full / paidTotal : 0, intentTotal ? bs.intent.full / intentTotal : 0, trialingTotal ? bs.trialing.full / trialingTotal : 0],
+      ['% Lite', paidTotal ? bs.paid.lite / paidTotal : 0, intentTotal ? bs.intent.lite / intentTotal : 0, trialingTotal ? bs.trialing.lite / trialingTotal : 0]
+    ],
+    { intCols: [2, 3, 4], pctRowsAcross: [4, 5] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, '# of Paying Firms / Seats by Stage')
@@ -1120,11 +1577,12 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
   row = ALLSTATS_writeTable_(sheet, row, 1,
     ['Metric', 'Value'],
     [
+      ['Avg ARR per firm (Paid, excl. managed)', data.metrics.avgRevenuePerFirmPaidExclManaged],
       ['Avg ARR per firm (Paid)', data.metrics.avgRevenuePerFirmPaid],
       ['Avg ARR per seat (Paid)', data.metrics.avgRevenuePerSeat],
       ['Avg seat count per firm (Paid)', data.metrics.avgSeatCountPerFirmPaid]
     ],
-    { currencyRows: [1, 2], intRows: [3] }
+    { currencyRows: [1, 2, 3], intRows: [4] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, 'Conversion + Retention')
@@ -1134,23 +1592,39 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
       [
         'Sign up to paid conversion',
         data.conversion.signupToPaidRate,
-        data.conversion.paidUs + ' / ' + data.conversion.totalSignedUp,
-        data.conversion.signupTrialPotential + ' trialing | max ' + ALLSTATS_fmtPct_(data.conversion.signupPotentialMaxRate)
+        data.conversion.paidUs + ' / ' + data.conversion.signupResolved,
+        data.conversion.signupTrialPotential + ' still trialing (' + ALLSTATS_fmtPct_(data.conversion.signupPotentialMaxRate) + ' max) | ' + data.conversion.totalSignedUp + ' total signups'
       ],
       [
         'Promo trial to paid conversion',
         data.conversion.promoToPaidRate,
-        data.conversion.promoToPaid + ' / ' + data.conversion.promoPool,
-        data.conversion.promoTrialPotential + ' not yet paid | max ' + ALLSTATS_fmtPct_(data.conversion.promoPotentialMaxRate)
+        data.conversion.promoToPaid + ' / ' + data.conversion.promoResolved,
+        data.conversion.promoTrialPotential + ' still trialing (' + ALLSTATS_fmtPct_(data.conversion.promoPotentialMaxRate) + ' max) | ' + data.conversion.promoPool + ' total promo signups'
       ],
       ['NRR (latest snapshot)', data.retention.nrr, data.retention.latest_snapshot || '', ''],
       ['GRR (latest snapshot)', data.retention.grr, data.retention.latest_snapshot || '', ''],
-      ['Logo churn rate', data.retention.logo_churn_rate, data.retention.churned_orgs + ' churned / ' + data.retention.base_orgs + ' base', ''],
-      ['Gross ARR churn rate', data.retention.gross_arr_churn_rate, 'Base ARR ' + ALLSTATS_fmtMoney_(data.retention.base_bom_arr), ''],
-      ['Full ARR churn rate', data.retention.full_arr_churn_rate, 'Churned ARR ' + ALLSTATS_fmtMoney_(data.retention.churned_arr), '']
+      ['Gross ARR churn rate (snapshot)', data.retention.gross_arr_churn_rate, 'Base ARR ' + ALLSTATS_fmtMoney_(data.retention.base_bom_arr), ''],
+      ['Full ARR churn rate (snapshot)', data.retention.full_arr_churn_rate, 'Churned ARR ' + ALLSTATS_fmtMoney_(data.retention.churned_arr), ''],
+      ['Churned orgs (subscription-based)', data.subscriptionChurn.churned_orgs, data.subscriptionChurn.canceled_orgs + ' canceled | ' + data.subscriptionChurn.scheduled_churn_orgs + ' scheduled cancel', ''],
+      ['Churned ARR (subscription-based)', data.subscriptionChurn.churned_arr, data.subscriptionChurn.churned_orgs ? ('Avg ' + ALLSTATS_fmtMoney_(data.subscriptionChurn.churned_arr / data.subscriptionChurn.churned_orgs) + ' per churn org') : '', ''],
+      ['Churned seats (subscription-based)', data.subscriptionChurn.churned_seats, data.subscriptionChurn.churned_orgs ? ('Avg ' + (data.subscriptionChurn.churned_seats / data.subscriptionChurn.churned_orgs).toFixed(1) + ' seats per churn org') : '', '']
     ],
-    { pctRows: [1, 2, 3, 4, 5, 6, 7] }
+    { pctRows: [1, 2, 3, 4, 5, 6], intRows: [7, 9], currencyRows: [8] }
   )
+
+  const churnAuditRows = (data.subscriptionChurn && data.subscriptionChurn.rows) ? data.subscriptionChurn.rows : []
+
+  if (churnAuditRows.length) {
+    row = ALLSTATS_writeSection_(sheet, row, 'Churned Orgs Audit (Subscription-Based)')
+    row = ALLSTATS_writeTable_(sheet, row, 1,
+      ['Org Name', 'Stripe Customer Email', 'Stripe Subscription ID', 'Seats', 'ARR', 'Status', 'Churn Type', 'Churn Reason', 'Subscription End Date', 'First Payment', 'Plan'],
+      churnAuditRows.map(o => [
+        o.org_name, o.stripe_customer_email || '', o.stripe_subscription_id || '', o.seat_count || 0, o.arr_yearly || 0, o.status || '', o.churn_type || '', o.churn_reason || '',
+        o.subscription_end_date || '', o.first_payment_date || '', o.plan_name || ''
+      ]),
+      { intCols: [4], currencyCols: [5], dateCols: [9, 10] }
+    )
+  }
 
   row = ALLSTATS_writeSection_(sheet, row, 'Net New ARR by Month')
   row = ALLSTATS_writeTable_(sheet, row, 1,
@@ -1174,33 +1648,35 @@ function ALLSTATS_renderAllStatsSheet_(sheet, data) {
 
   row = ALLSTATS_writeSection_(sheet, row, 'Waterfall (Latest Snapshot by Cohort)')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Snapshot', 'Cohort', 'SOM', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
+    ['Snapshot', 'Cohort', 'SOM', 'New', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
     (data.waterfall.byCohort || []).map(r => [
       data.waterfall.latest_snapshot || '',
       r.cohort,
       r.som,
+      r.new_customer,
       r.upgrade,
       r.downgrade,
       r.churn,
       r.eom
     ]),
-    { currencyCols: [3, 4, 5, 6, 7] }
+    { currencyCols: [3, 4, 5, 6, 7, 8] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, 'Waterfall (Latest Snapshot by Org)')
   row = ALLSTATS_writeTable_(sheet, row, 1,
-    ['Snapshot', 'Org ID', 'Org Name', 'SOM', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
+    ['Snapshot', 'Org ID', 'Org Name', 'SOM', 'New', 'Upgrade', 'Downgrade', 'Churn', 'EOM'],
     (data.waterfall.byOrg || []).map(r => [
       data.waterfall.latest_snapshot || '',
       r.org_id,
       r.org_name,
       r.som,
+      r.new_customer,
       r.upgrade,
       r.downgrade,
       r.churn,
       r.eom
     ]),
-    { currencyCols: [4, 5, 6, 7, 8] }
+    { currencyCols: [4, 5, 6, 7, 8, 9] }
   )
 
   row = ALLSTATS_writeSection_(sheet, row, 'Trialing (No Payment Method)')
@@ -1345,7 +1821,7 @@ function ALLSTATS_buildIndexes_(clerkUsers, clerkMems, clerkOrgs, posthogUsers, 
   const canonByClerkOrgId = new Map()
   for (const c of (canonOrgs || [])) {
     const appOrgId = ALLSTATS_str_(c.app_org_id)
-    const clerkOrgId = ALLSTATS_str_(c.clerk_org_id || c.org_id)
+    const clerkOrgId = ALLSTATS_str_(c.org_id)
     const orgId = appOrgId || clerkOrgId
     if (!orgId && !clerkOrgId) continue
 
@@ -1519,11 +1995,20 @@ function ALLSTATS_buildManualStripeChangesBySubId_(sheet) {
     if (!subId) continue
 
     const excludeReason = ALLSTATS_str_(r.exclude_reason).toLowerCase()
-    if (excludeReason !== 'internal') continue
+    const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+    if (!EXCLUDE_REASONS.has(excludeReason)) continue
     out.set(subId, { excludeInternal: true })
   }
 
   return out
+}
+
+function ALLSTATS_isInternalOrg_(r) {
+  const name = ALLSTATS_str_(r.org_name || r.org_slug || r.org).toLowerCase()
+  if (name.includes('ping') || name.includes('test')) return true
+  const email = ALLSTATS_str_(r.customer_email || r.billing_email || r.email).toLowerCase()
+  if (email.endsWith('@pingassistant.com')) return true
+  return false
 }
 
 function ALLSTATS_computeMrrArr_(amount, interval, intervalCount) {
@@ -1704,13 +2189,16 @@ function ALLSTATS_readSheetObjects_(sheet, headerRow) {
   if (lastRow < headerRow + 1) return []
 
   const header = sheet.getRange(headerRow, 1, 1, lastCol).getValues()[0].map(h => String(h || '').trim())
-  const data = sheet.getRange(headerRow + 1, 1, lastRow - headerRow, lastCol).getValues()
+  const range = sheet.getRange(headerRow + 1, 1, lastRow - headerRow, lastCol)
+  const data = range.getValues()
+  const display = range.getDisplayValues()
 
-  return data.map(r => {
+  return data.map((r, ri) => {
     const obj = {}
     header.forEach((h, i) => {
       if (!h) return
-      obj[ALLSTATS_key_(h)] = r[i]
+      const v = r[i]
+      obj[ALLSTATS_key_(h)] = (v instanceof Date) ? display[ri][i] : v
     })
     return obj
   })

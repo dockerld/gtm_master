@@ -9,12 +9,10 @@
  * - Email key: normalizeEmail() -> lower(trim(email))
  * - Batch writes: batchSetValues() writes in chunks to avoid limits
  * - Upserts: buildIndexByKey() builds {key: rowIndex0BasedInArray}
- * - Logging: writeSyncLog() appends to a "sync_log" tab
  * - Locking: lockWrap() prevents overlapping runs
  **************************************************************/
 
 const UTIL_CFG = {
-  SYNC_LOG_SHEET: 'sync_log',
   DEFAULT_BATCH_ROWS: 5000,
   LOCK_TIMEOUT_MS: 5 * 60 * 1000, // 5 minutes
 };
@@ -143,25 +141,9 @@ function buildIndexByKey(rows, keyColIndex0, opts) {
  * @param {number=} seconds
  * @param {string=} errorMsg
  */
-function writeSyncLog(step, status, rowsIn, rowsOut, seconds, errorMsg) {
-  const ss = SpreadsheetApp.getActive();
-  const sh = getOrCreateSheet(ss, UTIL_CFG.SYNC_LOG_SHEET);
-
-  if (sh.getLastRow() === 0) {
-    sh.appendRow(['timestamp', 'step', 'status', 'rows_in', 'rows_out', 'seconds', 'error']);
-    sh.setFrozenRows(1);
-  }
-
-  sh.appendRow([
-    new Date(),
-    step || '',
-    status || '',
-    rowsIn != null ? rowsIn : '',
-    rowsOut != null ? rowsOut : '',
-    seconds != null ? seconds : '',
-    errorMsg || ''
-  ]);
-}
+// No-op: sync_log sheet removed. All callers still reference this function
+// so we keep the signature to avoid runtime errors.
+function writeSyncLog() {}
 
 /**
  * Wrap a function call in a document lock to prevent overlapping runs.
@@ -199,4 +181,167 @@ function lockWrap(lockName, fn, opts) {
   } finally {
     try { lock.releaseLock(); } catch (e) {}
   }
+}
+
+/**************************************************************
+ * Shared Conversion Org List
+ *
+ * Builds a filtered, enriched org list from canon_orgs + Stripe
+ * for use in conversion metrics across all sheets.
+ *
+ * Returns array of objects:
+ *   { org_id, org_name, owner_email, org_created_at, trial_ends_at,
+ *     first_payment_at, is_paying, stripe_subscription_ids }
+ *
+ * Excludes:
+ *   - Org name contains "ping" or "test" (case-insensitive)
+ *   - Owner email ends with @pingassistant.com
+ *   - All subs in Manual Stripe Changes with exclude reason
+ **************************************************************/
+function buildConversionOrgList_(ss) {
+  // 1) Read canon_orgs
+  const shCanon = ss.getSheetByName('canon_orgs')
+  if (!shCanon) return []
+  const canonOrgs = CONVUTIL_readSheetObjects_(shCanon, 1)
+
+  // 2) Read raw_stripe_subscriptions for first_payment_at
+  const shStripe = ss.getSheetByName('raw_stripe_subscriptions')
+  const stripeRows = shStripe ? CONVUTIL_readSheetObjects_(shStripe, 1) : []
+  const stripeBySubId = new Map()
+  for (const r of stripeRows) {
+    const subId = CONVUTIL_str_(r.stripe_subscription_id || r.subscription_id || r.id)
+    if (subId) stripeBySubId.set(subId, r)
+  }
+
+  // 3) Build excluded sub IDs from Manual Stripe Changes
+  const excludedSubIds = CONVUTIL_buildExcludedSubIds_(ss)
+
+  // 4) Enrich and filter each canon org
+  const result = []
+  for (const org of canonOrgs) {
+    // Exclude internal/test orgs by name
+    const orgName = CONVUTIL_str_(org.org_name || org.org_slug).toLowerCase()
+    if (orgName.includes('ping') || orgName.includes('test')) continue
+
+    // Exclude by owner email
+    const ownerEmail = CONVUTIL_str_(org.owner_email).toLowerCase()
+    if (ownerEmail.endsWith('@pingassistant.com')) continue
+
+    // Parse subscription IDs
+    const subIds = CONVUTIL_csvList_(org.stripe_subscription_ids)
+    const nonExcludedSubs = subIds.filter(id => !excludedSubIds.has(id))
+
+    // If org has subs but ALL are excluded, skip
+    if (subIds.length > 0 && nonExcludedSubs.length === 0) continue
+
+    // Find earliest first_payment_at across non-excluded subs
+    let firstPaymentAt = null
+    for (const subId of nonExcludedSubs) {
+      const stripe = stripeBySubId.get(subId)
+      if (!stripe) continue
+      const fp = CONVUTIL_parseDate_(stripe.first_payment_at)
+      if (fp && (!firstPaymentAt || fp < firstPaymentAt)) {
+        firstPaymentAt = fp
+      }
+    }
+
+    // trial_ends_at from canon_orgs
+    const trialEndsAt = CONVUTIL_parseDate_(org.trial_ends_at)
+
+    // Determine if trial is resolved (ended) or still active
+    const now = new Date()
+    const status = CONVUTIL_str_(org.active_subscription_status || org.org_status).toLowerCase()
+    const isCurrentlyTrialing = (status === 'trialing' || status === 'active') && !firstPaymentAt
+    const trialResolved = !isCurrentlyTrialing
+
+    // Promo / trial extension: covers in-app promo, Stripe promo, AND manual Stripe extension
+    const hasPromoCode = !!(CONVUTIL_str_(org.combined_promo_codes) ||
+      CONVUTIL_str_(org.promo_code) ||
+      CONVUTIL_str_(org.stripe_promo_codes) ||
+      CONVUTIL_str_(org.app_promo_codes))
+    const trialExtended = CONVUTIL_str_(org.trial_extended).toLowerCase() === 'true'
+    const trialExtensionSource = CONVUTIL_str_(org.trial_extension_source)
+    const hasPromo = hasPromoCode || trialExtended
+
+    result.push({
+      org_id: CONVUTIL_str_(org.app_org_id || org.org_id),
+      org_name: CONVUTIL_str_(org.org_name),
+      owner_email: CONVUTIL_str_(org.owner_email),
+      org_created_at: CONVUTIL_parseDate_(org.org_created_at),
+      trial_ends_at: trialEndsAt,
+      first_payment_at: firstPaymentAt,
+      is_paying: CONVUTIL_str_(org.is_paying),
+      is_currently_trialing: isCurrentlyTrialing,
+      trial_resolved: trialResolved,
+      ever_had_sub: nonExcludedSubs.length > 0,
+      has_promo: hasPromo,
+      trial_extended: trialExtended,
+      trial_extension_source: trialExtensionSource,
+      promo_codes: CONVUTIL_str_(org.combined_promo_codes) || CONVUTIL_str_(org.promo_code) || '',
+      org_status: CONVUTIL_str_(org.org_status)
+    })
+  }
+  return result
+}
+
+// ── Conversion util helpers (prefixed to avoid collisions) ──
+
+function CONVUTIL_readSheetObjects_(sheet, headerRow) {
+  const lastRow = sheet.getLastRow()
+  const lastCol = sheet.getLastColumn()
+  if (lastRow < headerRow + 1 || lastCol < 1) return []
+
+  const header = sheet.getRange(headerRow, 1, 1, lastCol).getValues()[0]
+    .map(h => String(h || '').trim().toLowerCase().replace(/\s+/g, '_'))
+  const data = sheet.getRange(headerRow + 1, 1, lastRow - headerRow, lastCol).getValues()
+
+  return data.map(r => {
+    const obj = {}
+    header.forEach((h, i) => { if (h) obj[h] = r[i] })
+    return obj
+  })
+}
+
+function CONVUTIL_str_(v) {
+  if (v === null || v === undefined) return ''
+  return String(v).trim()
+}
+
+function CONVUTIL_csvList_(v) {
+  const s = CONVUTIL_str_(v)
+  if (!s) return []
+  return s.split(',').map(x => x.trim()).filter(Boolean)
+}
+
+function CONVUTIL_parseDate_(v) {
+  if (!v) return null
+  if (v instanceof Date) return isNaN(v.getTime()) ? null : v
+  const s = CONVUTIL_str_(v)
+  if (!s) return null
+  const d = new Date(s)
+  return isNaN(d.getTime()) ? null : d
+}
+
+function CONVUTIL_toMonthKey_(d) {
+  if (!d) return ''
+  const date = (d instanceof Date) ? d : CONVUTIL_parseDate_(d)
+  if (!date) return ''
+  const y = date.getFullYear()
+  const m = String(date.getMonth() + 1).padStart(2, '0')
+  return y + '-' + m
+}
+
+function CONVUTIL_buildExcludedSubIds_(ss) {
+  const out = new Set()
+  const sh = ss.getSheetByName('Manual Stripe Changes')
+  if (!sh) return out
+  const rows = CONVUTIL_readSheetObjects_(sh, 1)
+  const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+  for (const r of rows) {
+    const reason = CONVUTIL_str_(r.exclude_reason).toLowerCase()
+    if (!EXCLUDE_REASONS.has(reason)) continue
+    const subId = CONVUTIL_str_(r.subscription_id || r.stripe_subscription_id || r.subscription)
+    if (subId) out.add(subId)
+  }
+  return out
 }

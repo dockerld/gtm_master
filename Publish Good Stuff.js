@@ -20,8 +20,7 @@ const GOOD_STUFF_CFG = {
     PAID_WITH_FIRST_COL: 2, // B2:D2 in The Ring
     COMBINED_COL: 6         // F2:H2 in The Ring
   },
-  ANNUAL_GOAL_ARR: 1000000,
-  TABLE_START_ROW: 13
+  TABLE_START_ROW: 14
 }
 
 function publish_the_good_stuff() {
@@ -34,7 +33,7 @@ function publish_the_good_stuff() {
     const out = GOOD_getOrCreateSheet_(targetSs, GOOD_STUFF_CFG.TARGET.SHEET_NAME)
 
     const metrics = GOOD_readRingMetrics_(ring)
-    const goals = GOOD_readGoals_(sourceSs, metrics.combined.arr)
+    const goals = GOOD_readGoals_(sourceSs, metrics.paidWithFirstPayment.arr)
     const table = GOOD_readRingTable_(ring)
 
     GOOD_resetAndStyleCanvas_(out)
@@ -69,62 +68,65 @@ function GOOD_readRingMetrics_(ringSheet) {
 }
 
 function GOOD_readGoals_(sourceSs, currentArr) {
-  const monthlyGoal = GOOD_getMonthlyArrGoal_(sourceSs)
-  const annualGoal = GOOD_STUFF_CFG.ANNUAL_GOAL_ARR
+  const goalsData = GOOD_getGoalAndQuota_(sourceSs)
+  const monthlyQuota = goalsData.quotaArr
+  const monthlyGoal = goalsData.goalArr
 
-  const monthlyPct = monthlyGoal > 0 ? (currentArr / monthlyGoal) : 0
-  const annualPct = annualGoal > 0 ? (currentArr / annualGoal) : 0
+  const quotaPct = monthlyQuota > 0 ? (currentArr / monthlyQuota) : 0
+  const goalPct = monthlyGoal > 0 ? (currentArr / monthlyGoal) : 0
 
   return {
     currentArr: GOOD_num_(currentArr),
+    monthlyQuota: GOOD_num_(monthlyQuota),
     monthlyGoal: GOOD_num_(monthlyGoal),
-    annualGoal: GOOD_num_(annualGoal),
-    monthlyPct: GOOD_clamp01_(monthlyPct),
-    annualPct: GOOD_clamp01_(annualPct)
+    quotaPct: GOOD_clamp01_(quotaPct),
+    goalPct: GOOD_clamp01_(goalPct)
   }
 }
 
-function GOOD_getMonthlyArrGoal_(sourceSs) {
-  if (typeof getMonthlyArrGoalFromGoalsSheet_ === 'function') {
+function GOOD_getGoalAndQuota_(sourceSs) {
+  // Prefer the shared helper from Email notifications.js if available
+  if (typeof getMonthlyGoalAndQuotaFromGoalsSheet_ === 'function') {
     try {
-      const n = Number(getMonthlyArrGoalFromGoalsSheet_())
-      if (isFinite(n) && n > 0) return n
+      const r = getMonthlyGoalAndQuotaFromGoalsSheet_()
+      if (r && (r.goalArr > 0 || r.quotaArr > 0)) return r
     } catch (e) {}
   }
 
   const sh = sourceSs.getSheetByName('Goals')
-  if (!sh) return 0
+  if (!sh) return { goalArr: 0, quotaArr: 0 }
 
   const lastCol = sh.getLastColumn()
-  if (lastCol < 1) return 0
-
-  const headers = sh.getRange(1, 1, 1, lastCol).getDisplayValues()[0]
-  const arrRow = sh.getRange(2, 1, 1, lastCol).getValues()[0]
+  if (lastCol < 2) return { goalArr: 0, quotaArr: 0 }
 
   const tz = Session.getScriptTimeZone()
   const thisMonthKey = Utilities.formatDate(new Date(), tz, 'MMM-yyyy')
 
-  let idx = -1
+  // Quota: headers row 12, values row 13
+  const quotaArr = GOOD_findMonthValue_(sh, 12, 13, lastCol, thisMonthKey)
+  // Goal: headers row 6, values row 7
+  const goalArr = GOOD_findMonthValue_(sh, 6, 7, lastCol, thisMonthKey)
+
+  return { goalArr, quotaArr }
+}
+
+function GOOD_findMonthValue_(sh, headerRow, valueRow, lastCol, monthKey) {
+  const headers = sh.getRange(headerRow, 1, 1, lastCol).getDisplayValues()[0]
+  const values = sh.getRange(valueRow, 1, 1, lastCol).getValues()[0]
+
   for (let i = 0; i < headers.length; i++) {
-    if (String(headers[i] || '').trim() === thisMonthKey) {
-      idx = i
-      break
+    if (String(headers[i] || '').trim() === monthKey) {
+      const n = Number(values[i])
+      return isFinite(n) ? n : 0
     }
   }
 
-  if (idx === -1) {
-    for (let c = arrRow.length - 1; c >= 0; c--) {
-      const v = Number(arrRow[c])
-      if (isFinite(v) && v > 0) {
-        idx = c
-        break
-      }
-    }
+  // Fallback: latest positive value
+  for (let c = values.length - 1; c >= 0; c--) {
+    const n = Number(values[c])
+    if (isFinite(n) && n > 0) return n
   }
-
-  if (idx < 0) return 0
-  const n = Number(arrRow[idx])
-  return isFinite(n) ? n : 0
+  return 0
 }
 
 function GOOD_readRingTable_(ringSheet) {
@@ -156,13 +158,14 @@ function GOOD_resetAndStyleCanvas_(sheet) {
   sheet.clear()
   try { sheet.setHiddenGridlines(true) } catch (e) {}
 
-  for (let i = 1; i <= 12; i++) {
+  sheet.setColumnWidth(1, 30)
+  for (let i = 2; i <= 11; i++) {
     sheet.setColumnWidth(i, 180)
   }
 }
 
 function GOOD_writeHeader_(sheet) {
-  const titleRange = sheet.getRange(1, 1, 1, 12)
+  const titleRange = sheet.getRange(1, 2, 1, 10)
   titleRange.merge()
   titleRange
     .setValue('THE GOOD STUFF')
@@ -170,42 +173,42 @@ function GOOD_writeHeader_(sheet) {
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
     .setVerticalAlignment('middle')
-    .setBackground('#FFFFFF')
-    .setFontColor('#111111')
+    .setBackground('#1E293B')
+    .setFontColor('#FFFFFF')
 
-  const tz = Session.getScriptTimeZone()
-  const stamp = Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd HH:mm:ss')
-  const subtitle = sheet.getRange(2, 1, 1, 12)
+  const subtitle = sheet.getRange(2, 2, 1, 10)
   subtitle.merge()
   subtitle
-    .setValue(`Live snapshot from The Ring • Updated ${stamp}`)
+    .setValue('Path to $1,000,000')
     .setFontSize(11)
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
-    .setBackground('#FFFFFF')
-    .setFontColor('#374151')
+    .setBackground('#1E293B')
+    .setFontColor('#94A3B8')
 
   sheet.setRowHeight(1, 42)
   sheet.setRowHeight(2, 24)
 }
 
 function GOOD_writeGoalStrip_(sheet, goals) {
-  const labels = ['Current ARR', 'Monthly Goal', 'Annual Goal']
-  const values = [goals.currentArr, goals.monthlyGoal, goals.annualGoal]
-  const starts = [1, 5, 9]
+  const labels = ['CURRENT ARR', 'MONTHLY QUOTA', 'MONTHLY GOAL']
+  const values = [goals.currentArr, goals.monthlyQuota, goals.monthlyGoal]
+  const starts = [2, 5, 8]
+  const width = 2
+  const accents = ['#16A34A', '#3B82F6', '#D97706']
 
   for (let i = 0; i < starts.length; i++) {
     const c = starts[i]
-    const labelR = sheet.getRange(9, c, 1, 4)
+    const labelR = sheet.getRange(9, c, 1, width)
     labelR.merge()
     labelR
       .setValue(labels[i])
       .setFontWeight('bold')
       .setHorizontalAlignment('center')
-      .setBackground('#3B82F6')
-      .setFontColor('#F8FAFC')
+      .setBackground(accents[i])
+      .setFontColor('#FFFFFF')
 
-    const valueR = sheet.getRange(10, c, 1, 4)
+    const valueR = sheet.getRange(10, c, 1, width)
     valueR.merge()
     valueR
       .setValue(values[i])
@@ -217,16 +220,27 @@ function GOOD_writeGoalStrip_(sheet, goals) {
       .setFontColor('#0F172A')
   }
 
-  const progress = sheet.getRange(11, 1, 1, 12)
+  const progress = sheet.getRange(11, 2, 1, 10)
   progress.merge()
   progress
     .setValue(
-      `Progress • Monthly: ${GOOD_pctText_(goals.monthlyPct)}    |    Annual: ${GOOD_pctText_(goals.annualPct)}`
+      `Progress • Quota: ${GOOD_pctText_(goals.quotaPct)}    |    Goal: ${GOOD_pctText_(goals.goalPct)}`
     )
     .setHorizontalAlignment('center')
     .setFontWeight('bold')
     .setBackground('#E0F2FE')
     .setFontColor('#0C4A6E')
+
+  const scaleR = sheet.getRange(12, 2, 1, 10)
+  scaleR.merge()
+  const quotaStr = '$' + Math.round(goals.monthlyQuota / 1000) + 'K'
+  const goalStr = '$' + Math.round(goals.monthlyGoal / 1000) + 'K'
+  scaleR
+    .setValue(`$0                                              Sure ${quotaStr}                                              Ow! ${goalStr}`)
+    .setHorizontalAlignment('center')
+    .setFontSize(9)
+    .setFontColor('#94A3B8')
+    .setBackground('#FFFFFF')
 }
 
 function GOOD_writeKpiCards_(sheet, metrics) {
@@ -234,17 +248,17 @@ function GOOD_writeKpiCards_(sheet, metrics) {
     sheet,
     4,
     2,
-    metrics.paidWithFirstPayment.title || 'Paid + First Payment At',
+    metrics.paidWithFirstPayment.title || 'ARR',
     metrics.paidWithFirstPayment,
-    '#EA580C'
+    '#16A34A'
   )
   GOOD_writeKpiCard_(
     sheet,
     4,
     7,
-    metrics.combined.title || 'Paid + Promo Trial',
+    metrics.combined.title || 'Intent to Pay',
     metrics.combined,
-    '#2563EB'
+    '#D97706'
   )
 }
 
@@ -277,25 +291,28 @@ function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
   const labelSubsR = sheet.getRange(topRow + 2, startCol, 1, 2)
   labelSubsR.merge()
   labelSubsR
-    .setValue('Subscriptions')
+    .setValue('SUBSCRIPTIONS')
+    .setFontSize(10)
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
     .setBackground('#EEF2FF')
-    .setFontColor('#334155')
+    .setFontColor('#64748B')
 
   const labelSeatsR = sheet.getRange(topRow + 2, startCol + 2, 1, 2)
   labelSeatsR.merge()
   labelSeatsR
-    .setValue('Seats')
+    .setValue('SEATS')
+    .setFontSize(10)
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
     .setBackground('#EEF2FF')
-    .setFontColor('#334155')
+    .setFontColor('#64748B')
 
   const valueSubsR = sheet.getRange(topRow + 3, startCol, 1, 2)
   valueSubsR.merge()
   valueSubsR
     .setValue(data.subscriptions || 0)
+    .setFontSize(14)
     .setHorizontalAlignment('center')
     .setFontWeight('bold')
     .setBackground('#FFFFFF')
@@ -306,6 +323,7 @@ function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
   valueSeatsR.merge()
   valueSeatsR
     .setValue(data.totalSeats || 0)
+    .setFontSize(14)
     .setHorizontalAlignment('center')
     .setFontWeight('bold')
     .setBackground('#FFFFFF')
@@ -316,21 +334,21 @@ function GOOD_writeKpiCard_(sheet, topRow, startCol, title, data, accent) {
 function GOOD_writeTable_(sheet, startRow, headers, rows) {
   if (!headers || !headers.length) return
 
-  const headR = sheet.getRange(startRow, 1, 1, headers.length)
+  const headR = sheet.getRange(startRow, 2, 1, headers.length)
   headR.setValues([headers])
   headR
     .setFontWeight('bold')
     .setHorizontalAlignment('center')
-    .setBackground('#2563EB')
+    .setBackground('#1E293B')
     .setFontColor('#F8FAFC')
 
   if (rows && rows.length) {
-    const dataR = sheet.getRange(startRow + 1, 1, rows.length, headers.length)
+    const dataR = sheet.getRange(startRow + 1, 2, rows.length, headers.length)
     dataR.setValues(rows)
     dataR.setVerticalAlignment('middle')
 
     const h = headers.map(x => String(x || '').trim().toLowerCase())
-    const col = (name) => h.indexOf(name) + 1
+    const col = (name) => { const idx = h.indexOf(name); return idx >= 0 ? idx + 2 : 0 }
 
     const cAmount = col('amount')
     const cMrr = col('mrr')
@@ -338,6 +356,8 @@ function GOOD_writeTable_(sheet, startRow, headers, rows) {
     const cDisc = col('discount %')
     const cSeats = col('seats')
     const cFirstPay = col('first payment at')
+    const cSignUp = col('sign up date')
+    const cTrialDays = col('trial days remaining')
 
     if (cAmount > 0) sheet.getRange(startRow + 1, cAmount, rows.length, 1).setNumberFormat('$#,##0.00')
     if (cMrr > 0) sheet.getRange(startRow + 1, cMrr, rows.length, 1).setNumberFormat('$#,##0.00')
@@ -345,8 +365,10 @@ function GOOD_writeTable_(sheet, startRow, headers, rows) {
     if (cDisc > 0) sheet.getRange(startRow + 1, cDisc, rows.length, 1).setNumberFormat('0.##%')
     if (cSeats > 0) sheet.getRange(startRow + 1, cSeats, rows.length, 1).setNumberFormat('0')
     if (cFirstPay > 0) sheet.getRange(startRow + 1, cFirstPay, rows.length, 1).setNumberFormat('yyyy-mm-dd hh:mm:ss')
+    if (cSignUp > 0) sheet.getRange(startRow + 1, cSignUp, rows.length, 1).setNumberFormat('MM-dd-yy')
+    if (cTrialDays > 0) sheet.getRange(startRow + 1, cTrialDays, rows.length, 1).setNumberFormat('0')
 
-    try { sheet.getRange(startRow, 1, rows.length + 1, headers.length).applyRowBanding() } catch (e) {}
+    try { sheet.getRange(startRow, 2, rows.length + 1, headers.length).applyRowBanding() } catch (e) {}
   }
 
   sheet.setFrozenRows(startRow)

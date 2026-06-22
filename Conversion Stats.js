@@ -18,7 +18,6 @@
 
 const CONV_CFG = {
   SHEET_NAME: 'Conversion stats',
-  AUDIT_SHEET: 'Conversion stats audit',
   HEADER_ROW: 1,
   DATA_START_ROW: 2,
 
@@ -55,114 +54,6 @@ function render_org_conversion_stats() {
   })
 }
 
-function render_org_conversion_audit() {
-  CONV_lockWrapCompat_('render_org_conversion_audit', () => {
-    const t0 = new Date()
-    const ss = SpreadsheetApp.getActive()
-
-    const shOut = CONV_getOrCreateSheetCompat_(ss, CONV_CFG.AUDIT_SHEET)
-    const shOrgs = ss.getSheetByName(CONV_CFG.INPUTS.CLERK_ORGS)
-    const shArrRaw = ss.getSheetByName(CONV_CFG.INPUTS.ARR_RAW_DATA)
-
-    if (!shOrgs) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.CLERK_ORGS}`)
-    if (!shArrRaw) throw new Error(`Missing input sheet: ${CONV_CFG.INPUTS.ARR_RAW_DATA}`)
-
-    const tz = Session.getScriptTimeZone()
-
-    const orgs = CONV_readSheetObjects_(shOrgs, 1)
-    const arrRawRows = CONV_readSheetObjects_(shArrRaw, CONV_CFG.ARR_RAW_HEADER_ROW)
-
-    const orgInfoById = CONV_buildOrgInfoById_(arrRawRows)
-
-    const headers = [
-      'org_id',
-      'app_org_id',
-      'org_name',
-      'org_created_at',
-      'cohort_month',
-      'trial_start_date',
-      'trial_end_date',
-      'subscription_start_date',
-      'purchase_date',
-      'clean_window_start',
-      'clean_window_end',
-      'has_conversion',
-      'clean_conversion',
-      'notes'
-    ]
-
-    const rows = []
-    orgs.forEach(o => {
-      const orgId = CONV_str_(o.org_id)
-      if (!orgId) return
-
-      const orgName = CONV_str_(o.org_name) || CONV_str_(o.org_slug)
-      const orgCreatedAt = CONV_parseDate_(o.created_at || o.org_created_at)
-      const cohortMonth = orgCreatedAt ? Utilities.formatDate(orgCreatedAt, tz, CONV_CFG.MONTH_FMT) : ''
-
-      const info = orgInfoById.get(orgId) || {}
-      const appOrgId = CONV_str_(info.appOrgId)
-      const trialStart = info.trialStartDate || null
-      const trialEnd = info.trialEndDate || null
-      const subscriptionStart = info.subscriptionStartDate || null
-      const purchaseDate = info.purchaseDate || null
-
-      const windowStart = trialStart
-      const windowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
-
-      const hasConversion = !!subscriptionStart
-      const cleanConversion =
-        !!windowStart &&
-        !!windowEnd &&
-        !!purchaseDate &&
-        CONV_isWithinRange_(purchaseDate, windowStart, windowEnd)
-
-      const notes = []
-      if (!trialStart) notes.push('missing_trial_start')
-      if (!trialEnd) notes.push('missing_trial_end')
-      if (!purchaseDate) notes.push('missing_purchase_date')
-
-      rows.push([
-        orgId,
-        appOrgId,
-        orgName,
-        orgCreatedAt || '',
-        cohortMonth,
-        trialStart || '',
-        trialEnd || '',
-        subscriptionStart || '',
-        purchaseDate || '',
-        windowStart || '',
-        windowEnd || '',
-        hasConversion,
-        cleanConversion,
-        notes.join(';')
-      ])
-    })
-
-    rows.sort((a, b) => {
-      const aC = String(a[3] || '')
-      const bC = String(b[3] || '')
-      if (aC !== bC) return aC.localeCompare(bC)
-      return String(a[1] || '').localeCompare(String(b[1] || ''))
-    })
-
-    shOut.clearContents()
-    shOut.getRange(CONV_CFG.HEADER_ROW, 1, 1, headers.length).setValues([headers])
-    if (rows.length) {
-      CONV_batchSetValuesCompat_(shOut, CONV_CFG.DATA_START_ROW, 1, rows, 2000)
-    }
-
-    CONV_applyAuditFormats_(shOut, rows.length, headers)
-    shOut.setFrozenRows(CONV_CFG.HEADER_ROW)
-    shOut.autoResizeColumns(1, headers.length)
-
-    const seconds = (new Date() - t0) / 1000
-    CONV_writeSyncLogCompat_('render_org_conversion_audit', 'ok', rows.length, rows.length, seconds, '')
-    return { rows_out: rows.length }
-  })
-}
-
 /* =========================
  * Core logic
  * ========================= */
@@ -181,49 +72,47 @@ function CONV_getBucket_(map, monthKey) {
   return map.get(monthKey)
 }
 
-function CONV_collectStatsByMonth_(shOrgs, shArrRaw, tz) {
-  const orgs = CONV_readSheetObjects_(shOrgs, 1)
-  const orgInfo = CONV_readSheetObjects_(shArrRaw, CONV_CFG.ARR_RAW_HEADER_ROW)
-  const orgInfoById = CONV_buildOrgInfoById_(orgInfo)
+function CONV_collectStatsByMonth_(shOrgs, shArrRaw, tz, ss) {
+  // Uses shared canon_orgs-based org list (filtered, enriched with first_payment_at)
+  const convOrgs = ss ? buildConversionOrgList_(ss) : []
   const now = new Date()
   const statsByMonth = new Map()
 
-  orgs.forEach(o => {
-    const orgId = CONV_str_(o.org_id)
-    if (!orgId) return
-
-    const createdAt = CONV_parseDate_(o.created_at || o.org_created_at)
-    if (!createdAt) return
+  for (const org of convOrgs) {
+    const createdAt = org.org_created_at
+    if (!createdAt) continue
 
     const cohortMonth = Utilities.formatDate(createdAt, tz, CONV_CFG.MONTH_FMT)
-    if (!cohortMonth) return
+    if (!cohortMonth) continue
 
     const bucket = CONV_getBucket_(statsByMonth, cohortMonth)
     bucket.total += 1
 
-    const info = orgInfoById.get(orgId) || {}
-    const hasSubscription = !!info.subscriptionStartDate
-    if (hasSubscription) bucket.subscribed += 1
+    // Has a subscription (is_paying or has first_payment)
+    if (org.is_paying === 'TRUE' || org.is_paying === 'true' || org.first_payment_at) {
+      bucket.subscribed += 1
+    }
 
-    const trialStart = info.trialStartDate || null
-    const trialEnd = info.trialEndDate || null
-    const firstPaymentDate = info.purchaseDate || null
+    if (org.first_payment_at) bucket.paid += 1
+
+    // Paid within 7 days of trial end
+    const trialEnd = org.trial_ends_at
     const trialWindowEnd = trialEnd ? CONV_addDays_(trialEnd, 7) : null
-    if (firstPaymentDate) bucket.paid += 1
     const within7d =
-      trialStart &&
+      trialEnd &&
       trialWindowEnd &&
-      firstPaymentDate &&
-      CONV_isWithinRange_(firstPaymentDate, trialStart, trialWindowEnd)
+      org.first_payment_at &&
+      CONV_isWithinRange_(org.first_payment_at, trialEnd, trialWindowEnd)
     if (within7d) bucket.paidWithin7d += 1
 
     const inWindowUnpaid =
       !within7d &&
-      trialStart &&
+      trialEnd &&
       trialWindowEnd &&
-      CONV_isWithinRange_(now, trialStart, trialWindowEnd)
+      !org.first_payment_at &&
+      CONV_isWithinRange_(now, trialEnd, trialWindowEnd)
     if (inWindowUnpaid) bucket.inWindowUnpaid += 1
-  })
+  }
 
   return statsByMonth
 }
@@ -296,11 +185,11 @@ function CONV_buildRows_(statsByMonth) {
 function CONV_buildOrgInfoById_(orgInfoRows) {
   const out = new Map()
   ;(orgInfoRows || []).forEach(r => {
-    const clerkOrgId = CONV_str_(r.clerk_org_id)
     const appOrgId = CONV_str_(r.app_org_id)
     const legacyOrgId = CONV_str_(r.org_id)
     const payload = {
-      appOrgId: appOrgId || (clerkOrgId ? '' : legacyOrgId),
+      appOrgId: appOrgId || legacyOrgId,
+      subId: CONV_str_(r.stripe_subscription_id || r.subscription_id || r.latest_subscription_id),
       trialStartDate: CONV_parseDate_(r.trial_start_date),
       trialEndDate: CONV_parseDate_(r.trial_end_date),
       subscriptionStartDate: CONV_parseDate_(r.subscription_start_date),
@@ -308,7 +197,6 @@ function CONV_buildOrgInfoById_(orgInfoRows) {
     }
 
     if (legacyOrgId) out.set(legacyOrgId, payload)
-    if (clerkOrgId) out.set(clerkOrgId, payload)
     if (appOrgId) out.set(appOrgId, payload)
   })
   return out
@@ -388,33 +276,6 @@ function CONV_applyFormatsAt_(sheet, headerRow, dataStartRow, numDataRows) {
       .setFontWeight('bold')
       .setBackground('#F6F4F0')
   }
-}
-
-function CONV_applyAuditFormats_(sheet, numDataRows, headers) {
-  const headerRange = sheet.getRange(1, 1, 1, headers.length)
-  headerRange.setFontWeight('bold').setBackground('#F3F3F3')
-
-  if (!numDataRows) return
-
-  const startRow = CONV_CFG.DATA_START_ROW
-  const nRows = numDataRows
-
-  const dateHeaders = new Set([
-    'org_created_at',
-    'trial_start_date',
-    'trial_end_date',
-    'subscription_start_date',
-    'purchase_date',
-    'clean_window_start',
-    'clean_window_end'
-  ])
-
-  headers.forEach((h, idx) => {
-    const col = idx + 1
-    if (dateHeaders.has(h)) {
-      sheet.getRange(startRow, col, nRows, 1).setNumberFormat(CONV_CFG.DATE_FMT)
-    }
-  })
 }
 
 /* =========================
@@ -500,4 +361,47 @@ function CONV_lockWrapCompat_(lockName, fn) {
 function CONV_writeSyncLogCompat_(step, status, rowsIn, rowsOut, seconds, error) {
   if (typeof writeSyncLog === 'function') return writeSyncLog(step, status, rowsIn, rowsOut, seconds, error || '')
   Logger.log(`[SYNCLOG missing] ${step} ${status} rows_in=${rowsIn} rows_out=${rowsOut} seconds=${seconds} error=${error || ''}`)
+}
+
+function CONV_buildExcludedSubIds_(ss) {
+  const out = new Set()
+  const sh = ss.getSheetByName('Manual Stripe Changes')
+  if (!sh) return out
+  const rows = CONV_readSheetObjects_(sh, 1)
+  const EXCLUDE_REASONS = new Set(['internal', 'partner', 'free subscription'])
+  for (const r of rows) {
+    const reason = CONV_str_(r.exclude_reason).toLowerCase()
+    if (!EXCLUDE_REASONS.has(reason)) continue
+    const subId = CONV_str_(r.subscription_id || r.stripe_subscription_id || r.subscription)
+    if (subId) out.add(subId)
+  }
+  return out
+}
+
+function CONV_buildOwnerEmailByOrgId_(ss) {
+  const out = new Map()
+  const shOrgs = ss.getSheetByName('raw_clerk_orgs')
+  const shUsers = ss.getSheetByName('raw_clerk_users')
+  if (!shOrgs || !shUsers) return out
+
+  // Build user_id -> email from raw_clerk_users
+  const emailByUserId = new Map()
+  const users = CONV_readSheetObjects_(shUsers, 1)
+  for (const u of users) {
+    const userId = CONV_str_(u.clerk_user_id || u.user_id || u.id)
+    const email = CONV_str_(u.email)
+    if (userId && email) emailByUserId.set(userId, email)
+  }
+
+  // Map org_id -> owner email via org_owner_user_id
+  const orgs = CONV_readSheetObjects_(shOrgs, 1)
+  for (const o of orgs) {
+    const orgId = CONV_str_(o.org_id)
+    const ownerId = CONV_str_(o.org_owner_user_id)
+    if (orgId && ownerId) {
+      const email = emailByUserId.get(ownerId) || ''
+      if (email) out.set(orgId, email)
+    }
+  }
+  return out
 }
