@@ -205,6 +205,29 @@ function build_canon_users() {
         return Utilities.formatDate(d, 'UTC', 'yyyy-MM-dd')
       }
 
+      // Hot-path equivalent of asYMD_ that avoids Utilities.formatDate (which is
+      // expensive when called per-row over the full, ever-growing login_events sheet).
+      // Returns UTC yyyy-MM-dd. Behavior matches asYMD_ for Date objects, date-only
+      // strings, ISO strings, and numeric epoch values.
+      function fastYMD_(value) {
+        if (value instanceof Date) {
+          return isNaN(value.getTime()) ? '' : value.toISOString().slice(0, 10)
+        }
+        const s = String(value == null ? '' : value).trim()
+        if (!s) return ''
+        // Already date-only or ISO datetime → first 10 chars are yyyy-MM-dd
+        if (/^\d{4}-\d{2}-\d{2}/.test(s)) return s.slice(0, 10)
+        // Numeric epoch (seconds or millis)
+        if (/^\d+$/.test(s)) {
+          const n = Number(s)
+          if (!isFinite(n)) return ''
+          const d = new Date(n > 1e12 ? n : n * 1000)
+          return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10)
+        }
+        const d = new Date(s)
+        return isNaN(d.getTime()) ? '' : d.toISOString().slice(0, 10)
+      }
+
       function daysBetweenYMD_(ymdA, ymdB) {
         const aStr = String(ymdA || '').trim()
         const bStr = String(ymdB || '').trim()
@@ -446,17 +469,21 @@ function build_canon_users() {
 
           if (cEmail && cLoginDate) {
             const lastRow = shEvents.getLastRow()
-            const lastCol = shEvents.getLastColumn()
-            const data = shEvents.getRange(2, 1, lastRow - 1, lastCol).getValues()
+            const n = lastRow - 1
+            // Read ONLY the two columns we need (email + login_date) instead of the
+            // full row width. login_events is append-only and the widest/largest
+            // sheet, so narrowing the read is a big transfer win.
+            const emailsCol = shEvents.getRange(2, cEmail, n, 1).getValues()
+            const datesCol = shEvents.getRange(2, cLoginDate, n, 1).getValues()
 
             const datesByEmail = new Map() // email_key -> Set(yyyy-MM-dd)
-            data.forEach(r => {
-              const emailKey = normalizeEmailSafe_(String(r[cEmail - 1] || ''))
-              const loginDate = asYMD_(r[cLoginDate - 1]) // normalize if it’s Date/ISO
-              if (!emailKey || !loginDate) return
+            for (let i = 0; i < n; i++) {
+              const emailKey = normalizeEmailSafe_(String(emailsCol[i][0] || ''))
+              const loginDate = fastYMD_(datesCol[i][0]) // cheap normalize (no Utilities.formatDate)
+              if (!emailKey || !loginDate) continue
               if (!datesByEmail.has(emailKey)) datesByEmail.set(emailKey, new Set())
               datesByEmail.get(emailKey).add(loginDate)
-            })
+            }
 
             const out = new Map()
             datesByEmail.forEach((set, emailKey) => {
@@ -547,14 +574,27 @@ function build_canon_users() {
         if (rows && rows.length) batchSetValuesSafe_(sheet, 2, 1, rows, 5000)
       }
 
+      // ---------- Sub-step timing (writes to pipeline_log for visibility) ----------
+      // Lets us see exactly which phase of build_canon_users dominates. Safe no-op
+      // if writePipelineLog_ isn't present.
+      function phase_(label, fn) {
+        const p0 = new Date()
+        const result = fn()
+        const secs = (new Date() - p0) / 1000
+        if (typeof writePipelineLog_ === 'function') {
+          try { writePipelineLog_('build_canon_users', { step: label, status: 'ok', seconds: secs }) } catch (e) {}
+        }
+        return result
+      }
+
       // ---------- Build indices ----------
-      const membershipIdx = buildMembershipIndex_(mems)
-      const metricsByEmail = buildMetricsIndex_(metrics)
-      const loginRollups = buildLoginRollups_()
+      const membershipIdx = phase_('idx_memberships', () => buildMembershipIndex_(mems))
+      const metricsByEmail = phase_('idx_metrics', () => buildMetricsIndex_(metrics))
+      const loginRollups = phase_('login_rollups', () => buildLoginRollups_())
 
       // ---------- Manual preservation ----------
       const canonSheet = getOrCreateSheetSafe_(CFG.SHEETS.CANON_USERS)
-      const existingManual = readExistingManualOverrides_(canonSheet)
+      const existingManual = phase_('read_manual_overrides', () => readExistingManualOverrides_(canonSheet))
 
       // ---------- Build output ----------
       const today = new Date()
@@ -604,6 +644,7 @@ function build_canon_users() {
         return (fuzzy && users.map[fuzzy]) ? users.map[fuzzy] - 1 : -1
       })()
 
+      const _loopT0 = new Date()
       users.rows.forEach(r => {
         const clerkUserId =
           COL.clerk_user_id >= 0 ? String(r[COL.clerk_user_id] || '').trim() :
@@ -697,8 +738,11 @@ function build_canon_users() {
           today
         ])
       })
+      if (typeof writePipelineLog_ === 'function') {
+        try { writePipelineLog_('build_canon_users', { step: 'main_loop', status: 'ok', seconds: (new Date() - _loopT0) / 1000 }) } catch (e) {}
+      }
 
-      writeCanonOverwrite_(canonSheet, CFG.CANON_HEADERS, out)
+      phase_('write_canon', () => writeCanonOverwrite_(canonSheet, CFG.CANON_HEADERS, out))
 
       if (typeof writeSyncLog === 'function') {
         writeSyncLog(STEP, 'ok', rowsIn, out.length, (new Date() - t0) / 1000, '')
