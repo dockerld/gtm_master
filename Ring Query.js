@@ -75,6 +75,7 @@ SELECT customer_email, customer_name, org_name, status,
        seats
 FROM staged WHERE status!=''
 ORDER BY multiIf(status='Paid',1, status='Card Info Entered',2, 3), arr DESC
+LIMIT 5000
 `
 
 /**
