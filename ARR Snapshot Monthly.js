@@ -36,24 +36,25 @@ function write_arr_snapshot() {
   return write_arr_snapshot_monthly()
 }
 
-function write_arr_snapshot_monthly() {
-  lockWrapCompat_('write_arr_snapshot_monthly', () => {
+function write_arr_snapshot_monthly(cfgOverride) {
+  const CFG = Object.assign({}, ARR_SNAP_CFG, cfgOverride || {})
+  lockWrapCompat_(CFG.LOCK_NAME || 'write_arr_snapshot_monthly', () => {
     const t0 = new Date()
     const ss = SpreadsheetApp.getActive()
 
-    const src = ss.getSheetByName(ARR_SNAP_CFG.SOURCE_SHEET)
-    if (!src) throw new Error(`Source sheet not found: ${ARR_SNAP_CFG.SOURCE_SHEET}`)
+    const src = ss.getSheetByName(CFG.SOURCE_SHEET)
+    if (!src) throw new Error(`Source sheet not found: ${CFG.SOURCE_SHEET}`)
 
-    const snap = getOrCreateSheetCompat_(ss, ARR_SNAP_CFG.SNAP_SHEET)
+    const snap = getOrCreateSheetCompat_(ss, CFG.SNAP_SHEET)
     ARR_snap_pruneLatestIfNotMonthStart_(snap)
 
     const snapshotDate = ARR_snap_utcDateStr_(new Date())
 
-    const maxColsFromStart = src.getLastColumn() - ARR_SNAP_CFG.START_COL + 1
+    const maxColsFromStart = src.getLastColumn() - CFG.START_COL + 1
     if (maxColsFromStart <= 0) throw new Error('arr_raw_data has no columns in the expected region')
 
     const rawHeaderRow = src
-      .getRange(ARR_SNAP_CFG.HEADER_ROW, ARR_SNAP_CFG.START_COL, 1, maxColsFromStart)
+      .getRange(CFG.HEADER_ROW, CFG.START_COL, 1, maxColsFromStart)
       .getValues()[0]
       .map(h => String(h || '').trim())
 
@@ -61,20 +62,20 @@ function write_arr_snapshot_monthly() {
     if (headerWidth <= 0) throw new Error('arr_raw_data header row appears empty')
 
     const srcHeaders = rawHeaderRow.slice(0, headerWidth)
-    const keyIdxInSrc = srcHeaders.findIndex(h => h.toLowerCase() === ARR_SNAP_CFG.KEY_HEADER.toLowerCase())
-    if (keyIdxInSrc < 0) throw new Error(`arr_raw_data missing header: ${ARR_SNAP_CFG.KEY_HEADER}`)
+    const keyIdxInSrc = srcHeaders.findIndex(h => h.toLowerCase() === CFG.KEY_HEADER.toLowerCase())
+    if (keyIdxInSrc < 0) throw new Error(`arr_raw_data missing header: ${CFG.KEY_HEADER}`)
 
-    const arrIdxInSrc = srcHeaders.findIndex(h => h.toLowerCase() === ARR_SNAP_CFG.ARR_HEADER.toLowerCase())
-    if (arrIdxInSrc < 0) throw new Error(`arr_raw_data missing header: ${ARR_SNAP_CFG.ARR_HEADER}`)
+    const arrIdxInSrc = srcHeaders.findIndex(h => h.toLowerCase() === CFG.ARR_HEADER.toLowerCase())
+    if (arrIdxInSrc < 0) throw new Error(`arr_raw_data missing header: ${CFG.ARR_HEADER}`)
 
     const srcLastRow = src.getLastRow()
-    if (srcLastRow < ARR_SNAP_CFG.DATA_START_ROW) {
+    if (srcLastRow < CFG.DATA_START_ROW) {
       Logger.log('No data rows in arr_raw_data. Snapshot skipped.')
       return
     }
 
-    const numRows = srcLastRow - ARR_SNAP_CFG.DATA_START_ROW + 1
-    const srcData = src.getRange(ARR_SNAP_CFG.DATA_START_ROW, ARR_SNAP_CFG.START_COL, numRows, headerWidth).getValues()
+    const numRows = srcLastRow - CFG.DATA_START_ROW + 1
+    const srcData = src.getRange(CFG.DATA_START_ROW, CFG.START_COL, numRows, headerWidth).getValues()
 
     const rows = []
     for (const r of srcData) {
@@ -88,14 +89,14 @@ function write_arr_snapshot_monthly() {
       return
     }
 
-    const snapHeaders = [ARR_SNAP_CFG.SNAPSHOT_DATE_HEADER].concat(srcHeaders)
+    const snapHeaders = [CFG.SNAPSHOT_DATE_HEADER].concat(srcHeaders)
     ensureSnapshotHeaders_(snap, snapHeaders)
 
     const existingKeys = buildExistingSnapshotKeySetGeneric_(
       snap,
       snapshotDate,
-      ARR_SNAP_CFG.SNAPSHOT_DATE_HEADER,
-      ARR_SNAP_CFG.KEY_HEADER,
+      CFG.SNAPSHOT_DATE_HEADER,
+      CFG.KEY_HEADER,
       v => String(v || '').trim()
     )
 
@@ -121,7 +122,7 @@ function write_arr_snapshot_monthly() {
     }
 
     const startRow = snap.getLastRow() + 1
-    batchSetValuesCompat_(snap, startRow, 1, out, ARR_SNAP_CFG.WRITE_CHUNK)
+    batchSetValuesCompat_(snap, startRow, 1, out, CFG.WRITE_CHUNK)
     ARR_snap_applyCohortFormat_(snap)
 
     Logger.log(

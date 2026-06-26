@@ -121,3 +121,49 @@ function render_arr_raw_data_query_test() {
   Logger.log(`render_arr_raw_data_query_test: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
   return { rows_in: rows.length, rows_out: rows.length }
 }
+
+/* =========================
+ * Downstream test chain
+ *
+ * Runs the REAL snapshot + waterfall logic, but pointed at the
+ * "(Query Test)" / "(Test)" sheets so production tables are untouched.
+ *
+ * Note on layout: the query-test sheet writes its header on ROW 1
+ * (data row 2), so the snapshot test override uses HEADER_ROW:1 /
+ * DATA_START_ROW:2 (production arr_raw_data uses row 2 / row 3).
+ * The test snapshot sheet gets its header on row 1 (ensureSnapshotHeaders_),
+ * so the waterfall test keeps the default HEADER_ROW:1.
+ * ========================= */
+
+const ARR_TEST_SHEETS = {
+  RAW: 'arr_raw_data (Query Test)',
+  SNAP: 'arr_snapshot (Test)',
+  FACTS: 'arr_waterfall_facts (Test)'
+}
+
+// Build arr_snapshot (Test) from arr_raw_data (Query Test) using the real snapshot logic.
+function render_arr_snapshot_test() {
+  return write_arr_snapshot_monthly({
+    SOURCE_SHEET: ARR_TEST_SHEETS.RAW,
+    SNAP_SHEET: ARR_TEST_SHEETS.SNAP,
+    HEADER_ROW: 1,
+    DATA_START_ROW: 2,
+    LOCK_NAME: 'arr_snapshot_test'
+  })
+}
+
+// Build arr_waterfall_facts (Test) from arr_snapshot (Test) using the real waterfall logic.
+function render_arr_waterfall_facts_test() {
+  return render_arr_waterfall_facts({
+    SOURCE_SHEET: ARR_TEST_SHEETS.SNAP,
+    OUT_SHEET: ARR_TEST_SHEETS.FACTS,
+    LOCK_NAME: 'arr_waterfall_test'
+  })
+}
+
+// Convenience: run the whole test chain in order (query → snapshot → waterfall).
+function render_arr_chain_test() {
+  render_arr_raw_data_query_test()
+  render_arr_snapshot_test()
+  render_arr_waterfall_facts_test()
+}

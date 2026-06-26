@@ -39,22 +39,23 @@ const ARR_WATERFALL_CFG = {
   WRITE_CHUNK: 4000
 }
 
-function render_arr_waterfall_facts() {
-  lockWrapCompat_('render_arr_waterfall_facts', () => {
+function render_arr_waterfall_facts(cfgOverride) {
+  const CFG = Object.assign({}, ARR_WATERFALL_CFG, cfgOverride || {})
+  lockWrapCompat_(CFG.LOCK_NAME || 'render_arr_waterfall_facts', () => {
     const t0 = new Date()
     const ss = SpreadsheetApp.getActive()
 
-    const src = ss.getSheetByName(ARR_WATERFALL_CFG.SOURCE_SHEET)
-    if (!src) throw new Error(`Source sheet not found: ${ARR_WATERFALL_CFG.SOURCE_SHEET}`)
+    const src = ss.getSheetByName(CFG.SOURCE_SHEET)
+    if (!src) throw new Error(`Source sheet not found: ${CFG.SOURCE_SHEET}`)
 
-    const outSheet = getOrCreateSheetCompat_(ss, ARR_WATERFALL_CFG.OUT_SHEET)
+    const outSheet = getOrCreateSheetCompat_(ss, CFG.OUT_SHEET)
 
     const lastCol = src.getLastColumn()
     if (lastCol < 1) throw new Error('arr_snapshot has no columns')
     const tz = Session.getScriptTimeZone()
 
     const rawHeader = src
-      .getRange(ARR_WATERFALL_CFG.HEADER_ROW, 1, 1, lastCol)
+      .getRange(CFG.HEADER_ROW, 1, 1, lastCol)
       .getValues()[0]
       .map(h => String(h || '').trim())
 
@@ -62,36 +63,36 @@ function render_arr_waterfall_facts() {
     if (headerWidth <= 0) throw new Error('arr_snapshot header row appears empty')
 
     const headers = rawHeader.slice(0, headerWidth)
-    const snapIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.SNAPSHOT_DATE_HEADER.toLowerCase())
-    const orgIdIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.ORG_ID_HEADER.toLowerCase())
-    const orgNameIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.ORG_NAME_HEADER.toLowerCase())
-    const orgCreatedIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.ORG_CREATED_HEADER.toLowerCase())
-    const firstPaymentIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.FIRST_PAYMENT_HEADER.toLowerCase())
-    const churnDateIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.CHURN_DATE_HEADER.toLowerCase())
+    const snapIdx = headers.findIndex(h => h.toLowerCase() === CFG.SNAPSHOT_DATE_HEADER.toLowerCase())
+    const orgIdIdx = headers.findIndex(h => h.toLowerCase() === CFG.ORG_ID_HEADER.toLowerCase())
+    const orgNameIdx = headers.findIndex(h => h.toLowerCase() === CFG.ORG_NAME_HEADER.toLowerCase())
+    const orgCreatedIdx = headers.findIndex(h => h.toLowerCase() === CFG.ORG_CREATED_HEADER.toLowerCase())
+    const firstPaymentIdx = headers.findIndex(h => h.toLowerCase() === CFG.FIRST_PAYMENT_HEADER.toLowerCase())
+    const churnDateIdx = headers.findIndex(h => h.toLowerCase() === CFG.CHURN_DATE_HEADER.toLowerCase())
     const cohortIdx = headers.findIndex(h =>
-      h.toLowerCase() === ARR_WATERFALL_CFG.COHORT_HEADER.toLowerCase() ||
+      h.toLowerCase() === CFG.COHORT_HEADER.toLowerCase() ||
       h.toLowerCase() === 'cohort_month' ||
       h.toLowerCase() === 'trial_cohort_month'
     )
-    const paidCohortIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.PAID_COHORT_HEADER.toLowerCase())
-    const statusIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.STATUS_HEADER.toLowerCase())
-    const ringBucketIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.RING_BUCKET_HEADER.toLowerCase())
-    const planIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.PLAN_HEADER.toLowerCase())
-    const billingFreqIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.BILLING_FREQ_HEADER.toLowerCase())
-    const subStartIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.SUB_START_HEADER.toLowerCase())
-    const arrIdx = headers.findIndex(h => h.toLowerCase() === ARR_WATERFALL_CFG.ARR_HEADER.toLowerCase())
+    const paidCohortIdx = headers.findIndex(h => h.toLowerCase() === CFG.PAID_COHORT_HEADER.toLowerCase())
+    const statusIdx = headers.findIndex(h => h.toLowerCase() === CFG.STATUS_HEADER.toLowerCase())
+    const ringBucketIdx = headers.findIndex(h => h.toLowerCase() === CFG.RING_BUCKET_HEADER.toLowerCase())
+    const planIdx = headers.findIndex(h => h.toLowerCase() === CFG.PLAN_HEADER.toLowerCase())
+    const billingFreqIdx = headers.findIndex(h => h.toLowerCase() === CFG.BILLING_FREQ_HEADER.toLowerCase())
+    const subStartIdx = headers.findIndex(h => h.toLowerCase() === CFG.SUB_START_HEADER.toLowerCase())
+    const arrIdx = headers.findIndex(h => h.toLowerCase() === CFG.ARR_HEADER.toLowerCase())
 
-    if (snapIdx < 0) throw new Error(`arr_snapshot missing header: ${ARR_WATERFALL_CFG.SNAPSHOT_DATE_HEADER}`)
-    if (cohortIdx < 0) throw new Error(`arr_snapshot missing header: ${ARR_WATERFALL_CFG.COHORT_HEADER}`)
-    if (subStartIdx < 0) throw new Error(`arr_snapshot missing header: ${ARR_WATERFALL_CFG.SUB_START_HEADER}`)
-    if (orgCreatedIdx < 0) throw new Error(`arr_snapshot missing header: ${ARR_WATERFALL_CFG.ORG_CREATED_HEADER}`)
-    if (firstPaymentIdx < 0) throw new Error(`arr_snapshot missing header: ${ARR_WATERFALL_CFG.FIRST_PAYMENT_HEADER}`)
-    if (arrIdx < 0) throw new Error(`arr_snapshot missing header: ${ARR_WATERFALL_CFG.ARR_HEADER}`)
+    if (snapIdx < 0) throw new Error(`arr_snapshot missing header: ${CFG.SNAPSHOT_DATE_HEADER}`)
+    if (cohortIdx < 0) throw new Error(`arr_snapshot missing header: ${CFG.COHORT_HEADER}`)
+    if (subStartIdx < 0) throw new Error(`arr_snapshot missing header: ${CFG.SUB_START_HEADER}`)
+    if (orgCreatedIdx < 0) throw new Error(`arr_snapshot missing header: ${CFG.ORG_CREATED_HEADER}`)
+    if (firstPaymentIdx < 0) throw new Error(`arr_snapshot missing header: ${CFG.FIRST_PAYMENT_HEADER}`)
+    if (arrIdx < 0) throw new Error(`arr_snapshot missing header: ${CFG.ARR_HEADER}`)
 
     const lastRow = src.getLastRow()
-    const numRows = Math.max(0, lastRow - ARR_WATERFALL_CFG.HEADER_ROW)
+    const numRows = Math.max(0, lastRow - CFG.HEADER_ROW)
     const data = numRows
-      ? src.getRange(ARR_WATERFALL_CFG.DATA_START_ROW, 1, numRows, headerWidth).getValues()
+      ? src.getRange(CFG.DATA_START_ROW, 1, numRows, headerWidth).getValues()
       : []
 
     const records = []
@@ -364,7 +365,7 @@ function render_arr_waterfall_facts() {
     if (out.length) {
       // Force month column to plain text BEFORE writing so Sheets doesn't auto-convert YYYY-MM to dates
       outSheet.getRange(2, 1, out.length, 1).setNumberFormat('@')
-      batchSetValuesCompat_(outSheet, 2, 1, out, ARR_WATERFALL_CFG.WRITE_CHUNK)
+      batchSetValuesCompat_(outSheet, 2, 1, out, CFG.WRITE_CHUNK)
     }
 
     outSheet.setFrozenRows(1)
