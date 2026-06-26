@@ -3,7 +3,7 @@
  *
  * Two PostHog HogQL queries that rebuild "The Ring" — kept EXACTLY in
  * sync with the HubSpot Ring logic (dashboard tile 0wTWWPar):
- *   (A) RING SUMMARY  -> 3 rows: Paid / Intent to Pay / Trialing
+ *   (A) RING SUMMARY  -> 3 rows: Paid / Card Info Entered / Trialing
  *   (B) RING DETAIL   -> one row per org (all three statuses)
  *
  * Conventions:
@@ -12,7 +12,7 @@
  *     annualized (monthly x12, annual as-is).
  *   - MANAGED orgs (override sheet exclude_reason='managed') are valued at the
  *     override sheet's `amount` column (NOT run-rate). Applied inside org_arr.
- *   - Intent to Pay / Trialing ARR = POTENTIAL (plan list price annualized).
+ *   - Card Info Entered / Trialing ARR = POTENTIAL (plan list price annualized).
  *
  * Writes both to "The Ring (Query Test)" (summary block on top, detail below)
  * for verification against the live render_ring_view. Does NOT touch the real
@@ -25,7 +25,7 @@ const RING_QUERY_CFG = {
   OUT_SHEET: 'The Ring (Query Test)'
 }
 
-// (A) RING SUMMARY — 3 rows: Paid / Intent to Pay / Trialing
+// (A) RING SUMMARY — 3 rows: Paid / Card Info Entered / Trialing
 const RING_SUMMARY_HOGQL = `
 WITH
 inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
@@ -41,13 +41,13 @@ picked AS (SELECT org_id, stripe_subscription_id, stripe_customer_id, status AS 
 sx AS (SELECT id AS sub_id, coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval')) AS intv, arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount')*JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data')))/100.0 AS period_amt FROM stripe.subscription LIMIT 1 BY id),
 pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
 per_org AS (SELECT o.id AS org_id, coalesce(picked.full_seat_count,0)+coalesce(picked.lite_seat_count,0) AS seats, (pm.customer_id IS NOT NULL) AS has_pm, (fp_org.org_id IS NOT NULL) AS has_fp, (picked.app_status IN ('active','trialing')) AS is_live, coalesce(org_arr.arr_actual,0) AS arr_actual, round(coalesce(sx.period_amt,0)*if(sx.intv='month',12,1),2) AS arr_potential FROM (SELECT id FROM postgres.orgs LIMIT 1 BY id) o LEFT JOIN picked ON picked.org_id=o.id LEFT JOIN sx ON sx.sub_id=picked.stripe_subscription_id LEFT JOIN fp_org ON fp_org.org_id=o.id LEFT JOIN org_arr ON org_arr.org_id=o.id LEFT JOIN pm ON pm.customer_id=picked.stripe_customer_id),
-staged AS (SELECT *, multiIf(has_fp AND arr_actual>=0.01,'Paid', is_live AND has_pm,'Intent to Pay', is_live,'Trialing','') AS status, if(has_fp AND arr_actual>=0.01, arr_actual, arr_potential) AS arr_row FROM per_org)
+staged AS (SELECT *, multiIf(has_fp AND arr_actual>=0.01,'Paid', is_live AND has_pm,'Card Info Entered', is_live,'Trialing','') AS status, if(has_fp AND arr_actual>=0.01, arr_actual, arr_potential) AS arr_row FROM per_org)
 SELECT status, round(sum(arr_row),2) AS arr, count() AS subscriptions, sum(seats) AS total_seats
 FROM staged WHERE status!='' GROUP BY status
-ORDER BY multiIf(status='Paid',1, status='Intent to Pay',2, 3)
+ORDER BY multiIf(status='Paid',1, status='Card Info Entered',2, 3)
 `
 
-// (B) RING DETAIL — one row per org; all Paid + Intent to Pay + Trialing
+// (B) RING DETAIL — one row per org; all Paid + Card Info Entered + Trialing
 const RING_DETAIL_HOGQL = `
 WITH
 inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
@@ -65,7 +65,7 @@ pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
 cust AS (SELECT id, email, name FROM stripe.customer LIMIT 1 BY id),
 orgs AS (SELECT id, name, created_at FROM postgres.orgs LIMIT 1 BY id),
 per_org AS (SELECT o.id AS org_id, o.name AS org_name, o.created_at AS sign_up_date, cust.email AS customer_email, cust.name AS customer_name, fp_org.first_payment AS first_payment_at, picked.trial_ends_at AS trial_ends_at, sx.intv AS interval, coalesce(picked.full_seat_count,0)+coalesce(picked.lite_seat_count,0) AS seats, (pm.customer_id IS NOT NULL) AS has_pm, (fp_org.org_id IS NOT NULL) AS has_fp, (picked.app_status IN ('active','trialing')) AS is_live, coalesce(org_arr.arr_actual,0) AS arr_actual, round(coalesce(sx.period_amt,0)*if(sx.intv='month',12,1),2) AS arr_potential FROM orgs o LEFT JOIN picked ON picked.org_id=o.id LEFT JOIN sx ON sx.sub_id=picked.stripe_subscription_id LEFT JOIN fp_org ON fp_org.org_id=o.id LEFT JOIN org_arr ON org_arr.org_id=o.id LEFT JOIN pm ON pm.customer_id=picked.stripe_customer_id LEFT JOIN cust ON cust.id=picked.stripe_customer_id),
-staged AS (SELECT *, multiIf(has_fp AND arr_actual>=0.01,'Paid', is_live AND has_pm,'Intent to Pay', is_live,'Trialing','') AS status FROM per_org)
+staged AS (SELECT *, multiIf(has_fp AND arr_actual>=0.01,'Paid', is_live AND has_pm,'Card Info Entered', is_live,'Trialing','') AS status FROM per_org)
 SELECT customer_email, customer_name, org_name, status,
        formatDateTime(sign_up_date,'%Y-%m-%d') AS sign_up_date,
        if(first_payment_at IS NOT NULL, formatDateTime(first_payment_at,'%Y-%m-%d'), '') AS first_payment_at,
@@ -74,7 +74,7 @@ SELECT customer_email, customer_name, org_name, status,
        if(status='Paid', arr_actual, arr_potential) AS arr,
        seats
 FROM staged WHERE status!=''
-ORDER BY multiIf(status='Paid',1, status='Intent to Pay',2, 3), arr DESC
+ORDER BY multiIf(status='Paid',1, status='Card Info Entered',2, 3), arr DESC
 `
 
 /**

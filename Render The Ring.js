@@ -164,7 +164,7 @@ function render_ring_view() {
       sh.clear()
       writeKpis_(sh, {
         paid: mkBucket('Paid'),
-        promoTrial: mkBucket('Intent to Pay'),
+        promoTrial: mkBucket('Card Info Entered'),
         freeTrial: mkBucket('Trialing')
       })
       sh.getRange(RING_CFG.HEADER_ROW, RING_CFG.START_COL, 1, RING_CFG.HEADERS.length).setValues([RING_CFG.HEADERS])
@@ -709,7 +709,7 @@ function writeKpis_(sheet, { paid, promoTrial, freeTrial }) {
   sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidCols.SUBSCRIPTIONS).setValue((paid && paid.subscriptions) || 0)
   sheet.getRange(RING_CFG.KPI_ROW_VALUE, paidCols.TOTAL_SEATS).setValue((paid && paid.totalSeats) || 0)
 
-  sheet.getRange(RING_CFG.KPI_ROW_LABEL, promoCols.ARR).setValue('Intent to Pay')
+  sheet.getRange(RING_CFG.KPI_ROW_LABEL, promoCols.ARR).setValue('Card Info Entered')
   sheet.getRange(RING_CFG.KPI_ROW_LABEL, promoCols.SUBSCRIPTIONS).setValue('Subscriptions')
   sheet.getRange(RING_CFG.KPI_ROW_LABEL, promoCols.TOTAL_SEATS).setValue('Total Seats')
   sheet.getRange(RING_CFG.KPI_ROW_VALUE, promoCols.ARR).setValue((promoTrial && promoTrial.arr) || 0)
