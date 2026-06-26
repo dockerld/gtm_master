@@ -61,21 +61,21 @@ final AS (
   FROM assembled
 )
 SELECT
-  org_id,
-  org_name,
-  formatDateTime(org_creation_date, '%Y-%m-%d %H:%i:%S') AS org_creation_date,
-  if(first_payment_date IS NOT NULL, formatDateTime(first_payment_date, '%Y-%m-%d %H:%i:%S'), '') AS first_payment_date,
-  if(churn_date IS NOT NULL, formatDateTime(churn_date, '%Y-%m-%d %H:%i:%S'), '') AS churn_date,
-  formatDateTime(org_creation_date, '%b %Y') AS sign_up_cohort_month,
-  if(ring_bucket='paid' AND first_payment_date IS NOT NULL, formatDateTime(first_payment_date,'%b %Y'), '') AS paid_cohort_month,
-  current_status,
-  ring_bucket,
-  plan_name,
-  billing_frequency,
-  if(ring_bucket='paid', arr_paid, 0) AS total_arr,
-  formatDateTime(subscription_start_date, '%Y-%m-%d %H:%i:%S') AS subscription_start_date
+  final.org_id AS org_id,
+  final.org_name AS org_name,
+  formatDateTime(final.org_creation_date, '%Y-%m-%d %H:%i:%S') AS org_creation_date,
+  if(final.first_payment_date IS NOT NULL, formatDateTime(final.first_payment_date, '%Y-%m-%d %H:%i:%S'), '') AS first_payment_date,
+  if(final.churn_date IS NOT NULL, formatDateTime(final.churn_date, '%Y-%m-%d %H:%i:%S'), '') AS churn_date,
+  formatDateTime(final.org_creation_date, '%b %Y') AS sign_up_cohort_month,
+  if(final.ring_bucket='paid' AND final.first_payment_date IS NOT NULL, formatDateTime(final.first_payment_date,'%b %Y'), '') AS paid_cohort_month,
+  final.current_status AS current_status,
+  final.ring_bucket AS ring_bucket,
+  final.plan_name AS plan_name,
+  final.billing_frequency AS billing_frequency,
+  if(final.ring_bucket='paid', final.arr_paid, 0) AS total_arr,
+  formatDateTime(final.subscription_start_date, '%Y-%m-%d %H:%i:%S') AS subscription_start_date
 FROM final
-WHERE ring_bucket != ''
+WHERE final.ring_bucket != ''
 ORDER BY total_arr DESC
 LIMIT 1000
 `
