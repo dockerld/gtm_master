@@ -53,6 +53,8 @@ function onOpen() {
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
     .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
+    .addSeparator()
+    .addItem('TEST: Sauron from PostHog query', 'ui_render_sauron_query_test')
     .addToUi()
 }
 
@@ -163,6 +165,14 @@ function ui_render_weekly_ss_report() {
   return uiRunWrapped_('ui_render_weekly_ss_report', () => {
     runSteps_([
       { name: 'render_weekly_ss_report', fn: render_weekly_ss_report }
+    ])
+  })
+}
+
+function ui_render_sauron_query_test() {
+  return uiRunWrapped_('ui_render_sauron_query_test', () => {
+    runSteps_([
+      { name: 'render_sauron_query_test', fn: render_sauron_query_test }
     ])
   })
 }
