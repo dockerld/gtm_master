@@ -61,6 +61,57 @@ function render_arr_raw_data_view() {
   return ARR_lockWrap_("render_arr_raw_data_view", () => {
     const t0 = new Date()
     const ss = SpreadsheetApp.getActive()
+    const shOut = ARR_getOrCreateSheet_(ss, ARR_RAW_CFG.SHEET_NAME)
+
+    // Build arr_raw_data directly from the PostHog ARR query (server-side).
+    // Replaces the legacy combine of org_subscription_info + canon_orgs + stripe,
+    // which is preserved below as render_arr_raw_data_view_legacy_().
+    const props = PropertiesService.getScriptProperties()
+    const apiKey = props.getProperty('POSTHOG_API_KEY')
+    if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+    const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+
+    const out = sauronQueryRun_(apiKey, projectId, ARR_RAW_DATA_QUERY_HOGQL, 'render_arr_raw_data_view')
+    const columns = out.columns || []
+    const results = out.results || []
+
+    // Map returned columns -> the canonical header order (robust to query reordering).
+    const header = ARR_RAW_CFG.HEADERS.slice()
+    const colIdx = {}
+    columns.forEach((c, i) => { colIdx[String(c || '').toLowerCase()] = i })
+    const outRows = results.map(r => header.map(h => {
+      const i = colIdx[h.toLowerCase()]
+      const v = (i == null) ? '' : r[i]
+      return v == null ? '' : v
+    }))
+
+    // Header on row 2, data from row 3 (row 1 title preserved). This is exactly
+    // what write_arr_snapshot and Render Weekly SS Report read.
+    shOut.getRange(ARR_RAW_CFG.HEADER_ROW, 1, 1, Math.max(shOut.getMaxColumns(), header.length)).clearContent()
+    shOut.getRange(ARR_RAW_CFG.HEADER_ROW, 1, 1, header.length).setValues([header])
+    ARR_clearDataRegion_(shOut, ARR_RAW_CFG.DATA_START_ROW, header.length)
+    if (outRows.length) ARR_batchSetValues_(shOut, ARR_RAW_CFG.DATA_START_ROW, 1, outRows, 2000)
+    ARR_applyArrRawFormats_(shOut, header, outRows.length)
+    shOut.setFrozenRows(ARR_RAW_CFG.HEADER_ROW)
+    shOut.autoResizeColumns(1, header.length)
+
+    const seconds = (new Date() - t0) / 1000
+    if (typeof writeSyncLog === "function") {
+      writeSyncLog("render_arr_raw_data_view", "ok", outRows.length, outRows.length, seconds, "")
+    } else {
+      Logger.log(`[render_arr_raw_data_view] (query) ok rows_out=${outRows.length} seconds=${seconds}`)
+    }
+    return { rows_in: outRows.length, rows_out: outRows.length }
+  })
+}
+
+// Legacy combine-based builder (org_subscription_info + canon_orgs + stripe +
+// Manual Stripe Changes). Kept as a fallback; the pipeline now uses the
+// query-based render_arr_raw_data_view() above.
+function render_arr_raw_data_view_legacy_() {
+  return ARR_lockWrap_("render_arr_raw_data_view_legacy_", () => {
+    const t0 = new Date()
+    const ss = SpreadsheetApp.getActive()
 
     const shOut = ARR_getOrCreateSheet_(ss, ARR_RAW_CFG.SHEET_NAME)
     const shOrgSubsInfo = ss.getSheetByName(ARR_RAW_CFG.INPUTS.ORG_SUBS_INFO)

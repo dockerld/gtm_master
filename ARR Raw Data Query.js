@@ -1,26 +1,22 @@
 /**************************************************************
- * ARR Raw Data Query (TEST / verification)
+ * ARR Raw Data query (PRODUCTION)
  *
- * Runs a PostHog HogQL query that builds arr_raw_data server-side
- * (ARR per org from Stripe revenue items, ring bucket, cohorts)
- * and writes the result to a NEW sheet for verification against
- * the existing render_arr_raw_data_view pipeline before any swap.
+ * The HogQL query used by render_arr_raw_data_view() (in
+ * "ARR Waterfall Data.js") to build the LIVE arr_raw_data sheet
+ * server-side from PostHog (users/orgs/subscriptions/stripe).
  *
- * - Does NOT touch the real "arr_raw_data" sheet.
- * - Headers come straight from the query's returned columns.
- * - Run via menu: Ping Ops → "TEST: ARR Raw Data from PostHog query"
- *   or run render_arr_raw_data_query_test() directly in the editor.
+ * Output columns (match ARR_RAW_CFG.HEADERS exactly):
+ *   org_id, org_name, org_creation_date, first_payment_date, churn_date,
+ *   sign_up_cohort_month, paid_cohort_month, current_status, ring_bucket,
+ *   plan_name, billing_frequency, total_arr, subscription_start_date
  *
- * Script Properties used (same as the rest of the PostHog code):
- *  - POSTHOG_API_KEY
- *  - POSTHOG_PROJECT_ID (optional; falls back to POSTHOG_RAW_CFG)
+ * Date columns are formatted to 'YYYY-MM-DD HH:mm:ss' (project tz =
+ * US/Mountain); cohorts as 'MMM yyyy' (so the waterfall parses them).
+ *
+ * Run via the pipeline (part 2) or render_arr_raw_data_view() directly.
+ * Uses sauronQueryRun_ (defined in "Sauron Query.js").
  **************************************************************/
 
-const ARR_RAW_DATA_QUERY_CFG = {
-  OUT_SHEET: 'arr_raw_data (Query Test)'
-}
-
-// Query kept verbatim.
 const ARR_RAW_DATA_QUERY_HOGQL = `
 WITH
 inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
@@ -79,90 +75,3 @@ WHERE final.ring_bucket != ''
 ORDER BY total_arr DESC
 LIMIT 1000
 `
-
-/**
- * Run the arr_raw_data query and dump it to the test sheet.
- * Returns { rows_in, rows_out } for pipeline-style logging.
- */
-function render_arr_raw_data_query_test() {
-  const t0 = new Date()
-  const ss = SpreadsheetApp.getActive()
-
-  const props = PropertiesService.getScriptProperties()
-  const apiKey = props.getProperty('POSTHOG_API_KEY')
-  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
-  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
-
-  // Reuse the columns-aware HogQL runner (defined in Sauron Query.js).
-  const { columns, results } = sauronQueryRun_(apiKey, projectId, ARR_RAW_DATA_QUERY_HOGQL, 'arr_raw_data_query_test')
-
-  const headers = (columns && columns.length) ? columns : ['(no columns returned)']
-
-  const rows = (results || []).map(r => {
-    const row = new Array(headers.length)
-    for (let i = 0; i < headers.length; i++) row[i] = (r && r[i] != null) ? r[i] : ''
-    return row
-  })
-
-  const sh = ss.getSheetByName(ARR_RAW_DATA_QUERY_CFG.OUT_SHEET) || ss.insertSheet(ARR_RAW_DATA_QUERY_CFG.OUT_SHEET)
-  sh.clearContents()
-  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#F3F4F6')
-  sh.setFrozenRows(1)
-  if (rows.length) {
-    const chunk = 5000
-    for (let i = 0; i < rows.length; i += chunk) {
-      const part = rows.slice(i, i + chunk)
-      sh.getRange(2 + i, 1, part.length, headers.length).setValues(part)
-    }
-  }
-  try { sh.autoResizeColumns(1, headers.length) } catch (e) {}
-
-  Logger.log(`render_arr_raw_data_query_test: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
-  return { rows_in: rows.length, rows_out: rows.length }
-}
-
-/* =========================
- * Downstream test chain
- *
- * Runs the REAL snapshot + waterfall logic, but pointed at the
- * "(Query Test)" / "(Test)" sheets so production tables are untouched.
- *
- * Note on layout: the query-test sheet writes its header on ROW 1
- * (data row 2), so the snapshot test override uses HEADER_ROW:1 /
- * DATA_START_ROW:2 (production arr_raw_data uses row 2 / row 3).
- * The test snapshot sheet gets its header on row 1 (ensureSnapshotHeaders_),
- * so the waterfall test keeps the default HEADER_ROW:1.
- * ========================= */
-
-const ARR_TEST_SHEETS = {
-  RAW: 'arr_raw_data (Query Test)',
-  SNAP: 'arr_snapshot (Test)',
-  FACTS: 'arr_waterfall_facts (Test)'
-}
-
-// Build arr_snapshot (Test) from arr_raw_data (Query Test) using the real snapshot logic.
-function render_arr_snapshot_test() {
-  return write_arr_snapshot_monthly({
-    SOURCE_SHEET: ARR_TEST_SHEETS.RAW,
-    SNAP_SHEET: ARR_TEST_SHEETS.SNAP,
-    HEADER_ROW: 1,
-    DATA_START_ROW: 2,
-    LOCK_NAME: 'arr_snapshot_test'
-  })
-}
-
-// Build arr_waterfall_facts (Test) from arr_snapshot (Test) using the real waterfall logic.
-function render_arr_waterfall_facts_test() {
-  return render_arr_waterfall_facts({
-    SOURCE_SHEET: ARR_TEST_SHEETS.SNAP,
-    OUT_SHEET: ARR_TEST_SHEETS.FACTS,
-    LOCK_NAME: 'arr_waterfall_test'
-  })
-}
-
-// Convenience: run the whole test chain in order (query → snapshot → waterfall).
-function render_arr_chain_test() {
-  render_arr_raw_data_query_test()
-  render_arr_snapshot_test()
-  render_arr_waterfall_facts_test()
-}

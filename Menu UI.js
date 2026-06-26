@@ -54,13 +54,7 @@ function onOpen() {
     .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
     .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
     .addSeparator()
-    .addItem('TEST: Sauron from PostHog query', 'ui_render_sauron_query_test')
-    .addItem('TEST: Org Sub Info from PostHog query', 'ui_render_org_sub_info_query_test')
-    .addItem('TEST: Canon Orgs from PostHog query', 'ui_render_canon_orgs_query_test')
-    .addItem('TEST: ARR Raw Data from PostHog query', 'ui_render_arr_raw_data_query_test')
-    .addItem('TEST: ARR Snapshot (from query test)', 'ui_render_arr_snapshot_test')
-    .addItem('TEST: ARR Waterfall Facts (from test snapshot)', 'ui_render_arr_waterfall_facts_test')
-    .addItem('TEST: ARR full chain (query → snapshot → waterfall)', 'ui_render_arr_chain_test')
+    .addItem('Clean up query-test sheets', 'ui_cleanup_query_test_sheets')
     .addToUi()
 }
 
@@ -175,60 +169,33 @@ function ui_render_weekly_ss_report() {
   })
 }
 
-function ui_render_sauron_query_test() {
-  return uiRunWrapped_('ui_render_sauron_query_test', () => {
-    runSteps_([
-      { name: 'render_sauron_query_test', fn: render_sauron_query_test }
-    ])
+function ui_cleanup_query_test_sheets() {
+  return uiRunWrapped_('ui_cleanup_query_test_sheets', () => {
+    cleanup_query_test_sheets()
   })
 }
 
-function ui_render_org_sub_info_query_test() {
-  return uiRunWrapped_('ui_render_org_sub_info_query_test', () => {
-    runSteps_([
-      { name: 'render_org_sub_info_query_test', fn: render_org_sub_info_query_test }
-    ])
+/**
+ * One-time cleanup: delete the temporary PostHog-query verification sheets.
+ * Safe to re-run (skips any that are already gone).
+ */
+function cleanup_query_test_sheets() {
+  const ss = SpreadsheetApp.getActive()
+  const names = [
+    'arr_raw_data (Query Test)',
+    'arr_snapshot (Test)',
+    'arr_waterfall_facts (Test)',
+    'Sauron (Query Test)',
+    'org_subscription_info (Query Test)',
+    'canon_orgs (Query Test)'
+  ]
+  const deleted = []
+  names.forEach(n => {
+    const sh = ss.getSheetByName(n)
+    if (sh) { ss.deleteSheet(sh); deleted.push(n) }
   })
-}
-
-function ui_render_canon_orgs_query_test() {
-  return uiRunWrapped_('ui_render_canon_orgs_query_test', () => {
-    runSteps_([
-      { name: 'render_canon_orgs_query_test', fn: render_canon_orgs_query_test }
-    ])
-  })
-}
-
-function ui_render_arr_raw_data_query_test() {
-  return uiRunWrapped_('ui_render_arr_raw_data_query_test', () => {
-    runSteps_([
-      { name: 'render_arr_raw_data_query_test', fn: render_arr_raw_data_query_test }
-    ])
-  })
-}
-
-function ui_render_arr_snapshot_test() {
-  return uiRunWrapped_('ui_render_arr_snapshot_test', () => {
-    runSteps_([
-      { name: 'render_arr_snapshot_test', fn: render_arr_snapshot_test }
-    ])
-  })
-}
-
-function ui_render_arr_waterfall_facts_test() {
-  return uiRunWrapped_('ui_render_arr_waterfall_facts_test', () => {
-    runSteps_([
-      { name: 'render_arr_waterfall_facts_test', fn: render_arr_waterfall_facts_test }
-    ])
-  })
-}
-
-function ui_render_arr_chain_test() {
-  return uiRunWrapped_('ui_render_arr_chain_test', () => {
-    runSteps_([
-      { name: 'render_arr_chain_test', fn: render_arr_chain_test }
-    ])
-  })
+  ss.toast(deleted.length ? ('Deleted: ' + deleted.join(', ')) : 'No test sheets found', 'Cleanup', 8)
+  return { deleted }
 }
 
 
