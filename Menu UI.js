@@ -55,6 +55,7 @@ function onOpen() {
     .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
     .addSeparator()
     .addItem('TEST: Sauron from PostHog query', 'ui_render_sauron_query_test')
+    .addItem('TEST: Org Sub Info from PostHog query', 'ui_render_org_sub_info_query_test')
     .addToUi()
 }
 
@@ -173,6 +174,14 @@ function ui_render_sauron_query_test() {
   return uiRunWrapped_('ui_render_sauron_query_test', () => {
     runSteps_([
       { name: 'render_sauron_query_test', fn: render_sauron_query_test }
+    ])
+  })
+}
+
+function ui_render_org_sub_info_query_test() {
+  return uiRunWrapped_('ui_render_org_sub_info_query_test', () => {
+    runSteps_([
+      { name: 'render_org_sub_info_query_test', fn: render_org_sub_info_query_test }
     ])
   })
 }
