@@ -1,23 +1,22 @@
 /**************************************************************
- * Sauron Query (TEST / verification)
+ * Sauron (PRODUCTION)
  *
- * Runs a single PostHog HogQL query that joins everything
- * server-side (users, orgs, subscriptions, stripe, events, etc.)
- * and writes the raw result to a NEW sheet so it can be compared
- * against the existing combined Sauron pipeline before any swap.
+ * Builds the live "Sauron" sheet from a single PostHog HogQL query
+ * (users + orgs + subscriptions + stripe + events). Raw dump — manual
+ * columns are no longer preserved (that data lives in the CRM now).
  *
- * - Does NOT touch the real "Sauron" sheet.
- * - Headers come straight from the query's returned columns.
- * - Run via menu: Ping Ops → "TEST: Sauron from PostHog query"
- *   or run render_sauron_query_test() directly in the editor.
+ * Also exports sauronQueryRun_, the shared columns-aware HogQL runner
+ * used by the other query builders.
  *
- * Script Properties used (same as the rest of the PostHog code):
+ * render_sauron_view() runs in the daily pipeline.
+ *
+ * Script Properties used:
  *  - POSTHOG_API_KEY
  *  - POSTHOG_PROJECT_ID (optional; falls back to POSTHOG_RAW_CFG)
  **************************************************************/
 
 const SAURON_QUERY_CFG = {
-  OUT_SHEET: 'Sauron (Query Test)'
+  OUT_SHEET: 'Sauron'
 }
 
 // The query is kept verbatim so it matches what was validated in PostHog.
@@ -114,10 +113,11 @@ LIMIT 5000
 `
 
 /**
- * Run the combined HogQL query and dump it to the test sheet.
+ * Build the LIVE "Sauron" sheet from the PostHog query (raw dump — manual
+ * columns are no longer preserved; that lives in the CRM now).
  * Returns { rows_in, rows_out } for pipeline-style logging.
  */
-function render_sauron_query_test() {
+function render_sauron_view() {
   const t0 = new Date()
   const ss = SpreadsheetApp.getActive()
 
@@ -126,7 +126,7 @@ function render_sauron_query_test() {
   if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
   const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
 
-  const { columns, results } = sauronQueryRun_(apiKey, projectId, SAURON_QUERY_HOGQL, 'sauron_query_test')
+  const { columns, results } = sauronQueryRun_(apiKey, projectId, SAURON_QUERY_HOGQL, 'render_sauron_view')
 
   const headers = (columns && columns.length)
     ? columns
@@ -152,7 +152,10 @@ function render_sauron_query_test() {
   }
   try { sh.autoResizeColumns(1, headers.length) } catch (e) {}
 
-  Logger.log(`render_sauron_query_test: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
+  if (typeof writeSyncLog === 'function') {
+    writeSyncLog('render_sauron_view', 'ok', rows.length, rows.length, (new Date() - t0) / 1000, '')
+  }
+  Logger.log(`render_sauron_view: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
   return { rows_in: rows.length, rows_out: rows.length }
 }
 

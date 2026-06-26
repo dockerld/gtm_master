@@ -38,19 +38,11 @@
 function onOpen() {
   SpreadsheetApp.getUi()
     .createMenu('Ping Ops')
-    .addItem('Run daily pipeline (full)', 'ui_run_daily_pipeline')
-    .addItem('Run pipeline: Part 1 (pulls + canon)', 'ui_run_daily_pipeline_part1')
-    .addItem('Run pipeline: Part 2 (ARR + analytics)', 'ui_run_daily_pipeline_part2')
-    .addSeparator()
-    .addItem('Run only PostHog', 'ui_run_only_posthog')
-    .addItem('Run only Stripe', 'ui_run_only_stripe')
-    .addItem('Run The Ring only', 'ui_run_only_ring')
-    .addItem('Render All the Stats', 'ui_render_all_stats')
-    .addSeparator()
-    .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
+    .addItem('Run daily pipeline', 'ui_run_daily_pipeline_part1')
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
-    .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
+    .addItem('Render The Ring', 'ui_run_only_ring')
+    .addItem('Render All the Stats', 'ui_render_all_stats')
     .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
     .addItem('Clean up query-test sheets', 'ui_cleanup_query_test_sheets')
@@ -140,14 +132,6 @@ function ui_run_arr_refresh() {
       { name: 'render_arr_raw_data_view', fn: render_arr_raw_data_view },
       { name: 'write_arr_snapshot', fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts', fn: render_arr_waterfall_facts }
-    ])
-  })
-}
-
-function ui_generate_csm_commission_report() {
-  return uiRunWrapped_('ui_generate_csm_commission_report', () => {
-    runSteps_([
-      { name: 'render_csm_commission_report', fn: render_csm_commission_report }
     ])
   })
 }

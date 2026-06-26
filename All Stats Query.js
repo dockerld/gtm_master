@@ -1,0 +1,236 @@
+/**************************************************************
+ * All the Stats (PRODUCTION) — PostHog HogQL, multi-section
+ *
+ * Builds the "All the Stats" sheet from a set of self-contained HogQL
+ * queries (one per section), written as labeled blocks top-to-bottom.
+ * No canon tables / raw pulls — straight from PostHog (postgres + stripe),
+ * plus the synced snapshot/waterfall mirrors for the retention sections.
+ *
+ * Sections:
+ *   1. ARR / MRR Summary by Stage
+ *   3. Avg Revenue Metrics (Paid)
+ *   4. Churned / Scheduled-Cancel Audit
+ *   5. Trialing (No Payment Method)
+ *   6. Conversion (signup->paid, promo->paid)
+ *   7. NRR / GRR (from override_googlesheets_arr_snapshot)
+ *   8. Net New ARR by Month / Waterfall (from override_googlesheets_arr_waterfall_facts)
+ *
+ * Run via pipeline or render_all_stats_view() in the editor.
+ * Uses sauronQueryRun_ (defined in "Sauron Query.js").
+ **************************************************************/
+
+const ALL_STATS_CFG = {
+  OUT_SHEET: 'All the Stats'
+}
+
+const ALLSTATS_SECTION_1 = `
+WITH
+inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
+latest_inv AS (SELECT subscription_id, argMax(id, created_at) AS inv_id FROM inv_full GROUP BY subscription_id),
+rev AS (SELECT id, invoice_id, toFloat(amount) AS amt, toStartOfMonth(timestamp) AS mth FROM stripe.revenue_item_revenue_view WHERE is_recurring=1 LIMIT 1 BY id),
+sub_rev AS (SELECT li.subscription_id AS sid, round(SUM(rev.amt)/nullIf(uniq(rev.mth),0)*12,2) AS arr FROM latest_inv li JOIN rev ON rev.invoice_id=li.inv_id GROUP BY li.subscription_id),
+paid AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
+fp_org AS (SELECT org_id FROM postgres.org_subscriptions os JOIN stripe.invoice i ON i.subscription_id=os.stripe_subscription_id WHERE i.status='paid' AND toFloat(i.total)>0 GROUP BY org_id),
+org_arr AS (SELECT osb.org_id, round(sum(sr.arr),2) AS arr_actual FROM postgres.org_subscriptions osb JOIN sub_rev sr ON sr.sid=osb.stripe_subscription_id WHERE osb.stripe_subscription_id IN (SELECT subscription_id FROM paid) AND osb.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl) AND osb.status!='canceled' AND sr.arr>0 GROUP BY osb.org_id),
+picked AS (SELECT org_id, stripe_subscription_id, stripe_customer_id, status AS app_status, trial_ends_at, full_seat_count, lite_seat_count FROM postgres.org_subscriptions ORDER BY (stripe_subscription_id IN (SELECT subscription_id FROM paid) AND status!='canceled') DESC, (status='active') DESC, (status='trialing' AND trial_ends_at>now()) DESC, created_at DESC LIMIT 1 BY org_id),
+sx AS (SELECT id AS sub_id, coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval')) AS intv, arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount')*JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data')))/100.0 AS period_amt FROM stripe.subscription LIMIT 1 BY id),
+pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
+per_org AS (SELECT o.id AS org_id, coalesce(picked.full_seat_count,0) AS full_seats, coalesce(picked.lite_seat_count,0) AS lite_seats, (pm.customer_id IS NOT NULL) AS has_pm, (fp_org.org_id IS NOT NULL) AS has_fp, (picked.app_status IN ('active','trialing')) AS is_live, coalesce(org_arr.arr_actual,0) AS arr_actual, round(coalesce(sx.period_amt,0) * if(sx.intv='month',12,1),2) AS arr_potential FROM (SELECT id FROM postgres.orgs LIMIT 1 BY id) o LEFT JOIN picked ON picked.org_id=o.id LEFT JOIN sx ON sx.sub_id=picked.stripe_subscription_id LEFT JOIN fp_org ON fp_org.org_id=o.id LEFT JOIN org_arr ON org_arr.org_id=o.id LEFT JOIN pm ON pm.customer_id=picked.stripe_customer_id),
+staged AS (SELECT *, multiIf(has_fp AND arr_actual>=0.01,'Paid', is_live AND has_pm,'Intent to Pay', is_live,'Trialing','') AS stage, if(has_fp AND arr_actual>=0.01, arr_actual, arr_potential) AS arr_row FROM per_org)
+SELECT stage, count() AS firms, round(sum(arr_row),2) AS arr, round(sum(arr_row)/12,2) AS mrr,
+       sum(full_seats+lite_seats) AS seats, sum(full_seats) AS full_seats, sum(lite_seats) AS lite_seats,
+       round(sum(full_seats+lite_seats)/count(),2) AS avg_seats_per_firm
+FROM staged WHERE stage!='' GROUP BY stage ORDER BY arr DESC
+`
+
+const ALLSTATS_SECTION_3 = `
+WITH
+inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
+latest_inv AS (SELECT subscription_id, argMax(id, created_at) AS inv_id FROM inv_full GROUP BY subscription_id),
+rev AS (SELECT id, invoice_id, toFloat(amount) AS amt, toStartOfMonth(timestamp) AS mth FROM stripe.revenue_item_revenue_view WHERE is_recurring=1 LIMIT 1 BY id),
+sub_rev AS (SELECT li.subscription_id AS sid, round(SUM(rev.amt)/nullIf(uniq(rev.mth),0)*12,2) AS arr FROM latest_inv li JOIN rev ON rev.invoice_id=li.inv_id GROUP BY li.subscription_id),
+paid AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
+managed AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason)='managed'),
+org_arr AS (SELECT osb.org_id, round(sum(sr.arr),2) AS arr_actual, max(osb.stripe_subscription_id IN (SELECT subscription_id FROM managed)) AS is_managed FROM postgres.org_subscriptions osb JOIN sub_rev sr ON sr.sid=osb.stripe_subscription_id WHERE osb.stripe_subscription_id IN (SELECT subscription_id FROM paid) AND osb.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl) AND osb.status!='canceled' AND sr.arr>0 GROUP BY osb.org_id),
+picked AS (SELECT org_id, stripe_subscription_id, status AS app_status, trial_ends_at, full_seat_count, lite_seat_count FROM postgres.org_subscriptions ORDER BY (stripe_subscription_id IN (SELECT subscription_id FROM paid) AND status!='canceled') DESC, (status='active') DESC, (status='trialing' AND trial_ends_at>now()) DESC, created_at DESC LIMIT 1 BY org_id),
+paid_orgs AS (SELECT o.id AS org_id, org_arr.arr_actual AS arr, org_arr.is_managed AS is_managed, coalesce(picked.full_seat_count,0)+coalesce(picked.lite_seat_count,0) AS seats FROM (SELECT id FROM postgres.orgs LIMIT 1 BY id) o JOIN org_arr ON org_arr.org_id=o.id LEFT JOIN picked ON picked.org_id=o.id WHERE org_arr.arr_actual>=0.01)
+SELECT count() AS paid_firms, round(sum(arr),2) AS total_arr,
+       round(sum(arr)/count(),2) AS avg_arr_per_firm,
+       round(sumIf(arr, is_managed=0)/countIf(is_managed=0),2) AS avg_arr_per_firm_excl_managed,
+       round(sum(arr)/sum(seats),2) AS avg_arr_per_seat,
+       round(sum(seats)/count(),2) AS avg_seats_per_firm
+FROM paid_orgs
+`
+
+const ALLSTATS_SECTION_4 = `
+WITH
+inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
+latest_inv AS (SELECT subscription_id, argMax(id, created_at) AS inv_id FROM inv_full GROUP BY subscription_id),
+rev AS (SELECT id, invoice_id, toFloat(amount) AS amt, toStartOfMonth(timestamp) AS mth FROM stripe.revenue_item_revenue_view WHERE is_recurring=1 LIMIT 1 BY id),
+sub_rev AS (SELECT li.subscription_id AS sid, round(SUM(rev.amt)/nullIf(uniq(rev.mth),0)*12,2) AS arr FROM latest_inv li JOIN rev ON rev.invoice_id=li.inv_id GROUP BY li.subscription_id),
+paid AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
+firstpay AS (SELECT subscription_id AS sid, min(created_at) AS first_payment FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 GROUP BY subscription_id),
+picked AS (SELECT org_id, stripe_subscription_id, stripe_customer_id, status AS app_status, cancel_at_period_end, current_period_end, full_seat_count, lite_seat_count, trial_ends_at FROM postgres.org_subscriptions ORDER BY (stripe_subscription_id IN (SELECT subscription_id FROM paid) AND status!='canceled') DESC, (status='active') DESC, (status='trialing' AND trial_ends_at>now()) DESC, created_at DESC LIMIT 1 BY org_id),
+sx AS (SELECT id AS sub_id, coalesce(nullIf(plan.product,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','product')) AS product_id FROM stripe.subscription LIMIT 1 BY id),
+prod AS (SELECT id, name FROM stripe.product LIMIT 1 BY id),
+cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
+fp_org AS (SELECT org_id FROM postgres.org_subscriptions os JOIN stripe.invoice i ON i.subscription_id=os.stripe_subscription_id WHERE i.status='paid' AND toFloat(i.total)>0 GROUP BY org_id),
+orgs AS (SELECT id, name FROM postgres.orgs LIMIT 1 BY id)
+SELECT orgs.name AS org_name, cust.email AS customer_email, picked.stripe_subscription_id AS subscription_id,
+       (coalesce(picked.full_seat_count,0)+coalesce(picked.lite_seat_count,0)) AS seats,
+       round(coalesce(sub_rev.arr,0),2) AS arr, picked.app_status AS status,
+       if(picked.app_status='canceled','canceled','scheduled_cancel') AS churn_type,
+       formatDateTime(picked.current_period_end,'%Y-%m-%d') AS period_end_date,
+       formatDateTime(firstpay.first_payment,'%Y-%m-%d') AS first_payment,
+       prod.name AS plan
+FROM orgs JOIN picked ON picked.org_id=orgs.id
+LEFT JOIN sub_rev ON sub_rev.sid=picked.stripe_subscription_id
+LEFT JOIN firstpay ON firstpay.sid=picked.stripe_subscription_id
+LEFT JOIN sx ON sx.sub_id=picked.stripe_subscription_id
+LEFT JOIN prod ON prod.id=sx.product_id
+LEFT JOIN cust ON cust.id=picked.stripe_customer_id
+WHERE orgs.id IN (SELECT org_id FROM fp_org)
+  AND picked.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl)
+  AND (picked.app_status='canceled' OR (picked.app_status='active' AND picked.cancel_at_period_end=1))
+ORDER BY arr DESC
+LIMIT 5000
+`
+
+const ALLSTATS_SECTION_5 = `
+WITH
+paid AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+fp_org AS (SELECT org_id FROM postgres.org_subscriptions os JOIN stripe.invoice i ON i.subscription_id=os.stripe_subscription_id WHERE i.status='paid' AND toFloat(i.total)>0 GROUP BY org_id),
+picked AS (SELECT org_id, stripe_subscription_id, stripe_customer_id, status AS app_status, created_at AS sub_created, trial_ends_at, full_seat_count, lite_seat_count FROM postgres.org_subscriptions ORDER BY (stripe_subscription_id IN (SELECT subscription_id FROM paid) AND status!='canceled') DESC, (status='active') DESC, (status='trialing' AND trial_ends_at>now()) DESC, created_at DESC LIMIT 1 BY org_id),
+sx AS (SELECT id AS sub_id, arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount')*JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data')))/100.0 AS mrr, coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval')) AS intv FROM stripe.subscription LIMIT 1 BY id),
+pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
+cust AS (SELECT id, email, name FROM stripe.customer LIMIT 1 BY id),
+orgs AS (SELECT id, name FROM postgres.orgs LIMIT 1 BY id)
+SELECT picked.org_id AS org_id, orgs.name AS org_name, cust.name AS customer_name, cust.email AS customer_email,
+       dateDiff('day', picked.sub_created, now()) AS days_in_trial,
+       (coalesce(picked.full_seat_count,0)+coalesce(picked.lite_seat_count,0)) AS seats,
+       round(coalesce(sx.mrr,0),2) AS mrr,
+       round(coalesce(sx.mrr,0)*if(sx.intv='month',12,1),2) AS arr_potential,
+       picked.stripe_subscription_id AS subscription_id
+FROM orgs JOIN picked ON picked.org_id=orgs.id
+LEFT JOIN sx ON sx.sub_id=picked.stripe_subscription_id
+LEFT JOIN pm ON pm.customer_id=picked.stripe_customer_id
+LEFT JOIN cust ON cust.id=picked.stripe_customer_id
+WHERE picked.app_status IN ('active','trialing') AND pm.customer_id IS NULL AND picked.org_id NOT IN (SELECT org_id FROM fp_org)
+ORDER BY days_in_trial ASC
+LIMIT 5000
+`
+
+const ALLSTATS_SECTION_6 = `
+WITH
+inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
+latest_inv AS (SELECT subscription_id, argMax(id, created_at) AS inv_id FROM inv_full GROUP BY subscription_id),
+rev AS (SELECT id, invoice_id, toFloat(amount) AS amt, toStartOfMonth(timestamp) AS mth FROM stripe.revenue_item_revenue_view WHERE is_recurring=1 LIMIT 1 BY id),
+sub_rev AS (SELECT li.subscription_id AS sid, round(SUM(rev.amt)/nullIf(uniq(rev.mth),0)*12,2) AS arr FROM latest_inv li JOIN rev ON rev.invoice_id=li.inv_id GROUP BY li.subscription_id),
+paidsub AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
+org_arr AS (SELECT osb.org_id FROM postgres.org_subscriptions osb JOIN sub_rev sr ON sr.sid=osb.stripe_subscription_id WHERE osb.stripe_subscription_id IN (SELECT subscription_id FROM paidsub) AND osb.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl) AND osb.status!='canceled' AND sr.arr>0 GROUP BY osb.org_id),
+founder AS (SELECT uo.org_id AS org_id, argMin(u.email, uo.created_at) AS email FROM postgres.users_orgs uo JOIN postgres.users u ON u.id=uo.user_id GROUP BY uo.org_id),
+noninternal AS (SELECT org_id FROM founder WHERE email IS NOT NULL AND email!='' AND email NOT ILIKE '%@pingassistant.com%' AND email NOT ILIKE '%@pingassistant.dev%' AND email NOT ILIKE '%@posthog.com%' AND email NOT IN ('gptfam69@gmail.com','chad@bookends.app','stormmgarnett@gmail.com')),
+promo AS (SELECT DISTINCT org_id FROM postgres.promo_redemptions)
+SELECT (SELECT count() FROM noninternal) AS total_signups,
+       (SELECT count() FROM noninternal WHERE org_id IN (SELECT org_id FROM org_arr)) AS converted,
+       round((SELECT count() FROM noninternal WHERE org_id IN (SELECT org_id FROM org_arr)) / (SELECT count() FROM noninternal) * 100, 1) AS signup_to_paid_pct,
+       (SELECT count() FROM noninternal WHERE org_id IN (SELECT org_id FROM promo)) AS promo_signups,
+       (SELECT count() FROM noninternal WHERE org_id IN (SELECT org_id FROM promo) AND org_id IN (SELECT org_id FROM org_arr)) AS promo_converted,
+       round((SELECT count() FROM noninternal WHERE org_id IN (SELECT org_id FROM promo) AND org_id IN (SELECT org_id FROM org_arr)) / (SELECT count() FROM noninternal WHERE org_id IN (SELECT org_id FROM promo)) * 100, 1) AS promo_to_paid_pct
+`
+
+const ALLSTATS_SECTION_7 = `
+WITH s AS (SELECT org_id, snapshot_date, max(toFloat(total_arr)) AS arr FROM override_googlesheets_arr_snapshot GROUP BY org_id, snapshot_date),
+base AS (SELECT org_id, arr AS base_arr FROM s WHERE snapshot_date='2026-04-01' AND arr>0),
+curr AS (SELECT org_id, arr AS curr_arr FROM s WHERE snapshot_date='2026-05-01')
+SELECT round(sum(base_arr),2) AS base_total,
+       round(sum(coalesce(curr.curr_arr,0)),2) AS retained_plus_expansion,
+       round(sum(coalesce(curr.curr_arr,0))/sum(base_arr)*100,1) AS nrr_pct,
+       round(sum(least(coalesce(curr.curr_arr,0), base_arr))/sum(base_arr)*100,1) AS grr_pct
+FROM base LEFT JOIN curr ON curr.org_id=base.org_id
+`
+
+const ALLSTATS_SECTION_8 = `
+WITH d AS (SELECT month, org_id, metric, max(toFloat(amount)) AS amount FROM override_googlesheets_arr_waterfall_facts GROUP BY month, org_id, metric)
+SELECT month,
+       round(sumIf(amount,metric='SOM'),2)       AS som,
+       round(sumIf(amount,metric='New'),2)       AS new,
+       round(sumIf(amount,metric='Upgrade'),2)   AS upgrade,
+       round(sumIf(amount,metric='Downgrade'),2) AS downgrade,
+       round(sumIf(amount,metric='Churn'),2)     AS churn,
+       round(sumIf(amount,metric='EOM'),2)       AS eom
+FROM d GROUP BY month ORDER BY month
+LIMIT 5000
+`
+
+const ALLSTATS_SECTIONS = [
+  { title: 'ARR / MRR Summary by Stage', hogql: ALLSTATS_SECTION_1 },
+  { title: 'Avg Revenue Metrics (Paid)', hogql: ALLSTATS_SECTION_3 },
+  { title: 'Churned / Scheduled-Cancel Audit', hogql: ALLSTATS_SECTION_4 },
+  { title: 'Trialing (No Payment Method)', hogql: ALLSTATS_SECTION_5 },
+  { title: 'Conversion (signup to paid, promo to paid)', hogql: ALLSTATS_SECTION_6 },
+  { title: 'NRR / GRR', hogql: ALLSTATS_SECTION_7 },
+  { title: 'Net New ARR by Month / Waterfall', hogql: ALLSTATS_SECTION_8 }
+]
+
+/**
+ * Build the "All the Stats" sheet from the section queries (labeled blocks).
+ */
+function render_all_stats_view() {
+  const t0 = new Date()
+  const ss = SpreadsheetApp.getActive()
+
+  const props = PropertiesService.getScriptProperties()
+  const apiKey = props.getProperty('POSTHOG_API_KEY')
+  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+
+  const sh = ss.getSheetByName(ALL_STATS_CFG.OUT_SHEET) || ss.insertSheet(ALL_STATS_CFG.OUT_SHEET)
+  sh.clear()
+
+  let row = 1
+  let totalRows = 0
+  let maxCols = 1
+
+  for (const section of ALLSTATS_SECTIONS) {
+    const { columns, results } = sauronQueryRun_(apiKey, projectId, section.hogql, 'all_stats:' + section.title)
+    const headers = (columns && columns.length) ? columns : ['(no columns)']
+    maxCols = Math.max(maxCols, headers.length)
+
+    // Section title
+    sh.getRange(row, 1, 1, 1).setValues([[section.title]]).setFontWeight('bold').setFontSize(12)
+    row++
+    // Column headers
+    sh.getRange(row, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#F3F4F6')
+    row++
+    // Data rows
+    const rows = (results || []).map(r => {
+      const out = new Array(headers.length)
+      for (let i = 0; i < headers.length; i++) out[i] = (r && r[i] != null) ? r[i] : ''
+      return out
+    })
+    if (rows.length) {
+      const chunk = 5000
+      for (let i = 0; i < rows.length; i += chunk) {
+        const part = rows.slice(i, i + chunk)
+        sh.getRange(row + i, 1, part.length, headers.length).setValues(part)
+      }
+      row += rows.length
+      totalRows += rows.length
+    }
+    // Gap between sections
+    row += 2
+  }
+
+  try { sh.autoResizeColumns(1, maxCols) } catch (e) {}
+
+  if (typeof writeSyncLog === 'function') {
+    writeSyncLog('render_all_stats_view', 'ok', '', totalRows, (new Date() - t0) / 1000, '')
+  }
+  Logger.log(`render_all_stats_view: ${ALLSTATS_SECTIONS.length} sections, ${totalRows} data rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
+  return { rows_in: ALLSTATS_SECTIONS.length, rows_out: totalRows }
+}

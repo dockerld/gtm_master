@@ -14,35 +14,25 @@
  * - Per-step timing is written to the "pipeline_log" sheet
  **************************************************************/
 
+// Slimmed daily pipeline: every table is built directly from a single
+// PostHog HogQL query (no raw pulls, no canon builds), plus the ARR snapshot
+// + waterfall which are derived from arr_raw_data. Everything runs in part1
+// now (it's all fast). PART2 is intentionally empty — delete its trigger.
 const PIPELINE_PART1_STEPS_ = [
-  { name: 'clerk_pull_users_to_raw',               fn: () => clerk_pull_users_to_raw() },
-  { name: 'clerk_pull_orgs_to_raw',                fn: () => clerk_pull_orgs_to_raw() },
-  { name: 'clerk_pull_memberships_to_raw',         fn: () => clerk_pull_memberships_to_raw() },
-  { name: 'syncClerkUsers',                        fn: () => syncClerkUsers() },
-
-  { name: 'stripe_pull_subscriptions_to_raw',      fn: () => stripe_pull_subscriptions_to_raw() },
-
-  { name: 'posthog_pull_user_metrics_to_raw',      fn: () => posthog_pull_user_metrics_to_raw() },
-  { name: 'posthog_pull_org_subscriptions_to_raw', fn: () => posthog_pull_org_subscriptions_to_raw() },
-  { name: 'posthog_pull_orgs_to_raw',              fn: () => posthog_pull_orgs_to_raw() },
-  { name: 'posthog_pull_promo_redemptions_to_raw', fn: () => posthog_pull_promo_redemptions_to_raw() },
-
-  { name: 'render_org_subscription_info',          fn: () => render_org_subscription_info() },
-  { name: 'build_canon_orgs',                      fn: () => build_canon_orgs() },
-  { name: 'build_canon_users',                     fn: () => build_canon_users() },
-  { name: 'render_sauron_view',                    fn: () => render_sauron_view() }
-]
-
-const PIPELINE_PART2_STEPS_ = [
+  // ARR chain
   { name: 'render_arr_raw_data_view',              fn: () => render_arr_raw_data_view() },
   { name: 'write_arr_snapshot',                    fn: () => write_arr_snapshot() },
   { name: 'render_arr_waterfall_facts',            fn: () => render_arr_waterfall_facts() },
 
+  // Query-built tables (self-contained from PostHog)
+  { name: 'render_org_subscription_info',          fn: () => render_org_subscription_info() },
+  { name: 'render_middle_earth',                   fn: () => render_middle_earth() },
   { name: 'render_ring_view',                      fn: () => render_ring_view() },
-  { name: 'render_all_stats_view',                 fn: () => render_all_stats_view() },
-
-  { name: 'render_csm_commission_report',          fn: () => render_csm_commission_report() }
+  { name: 'render_sauron_view',                    fn: () => render_sauron_view() },
+  { name: 'render_all_stats_view',                 fn: () => render_all_stats_view() }
 ]
+
+const PIPELINE_PART2_STEPS_ = []
 
 function run_daily_pipeline_part1() {
   return runPipeline_('run_daily_pipeline_part1', PIPELINE_PART1_STEPS_)
