@@ -53,6 +53,7 @@ function onOpen() {
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
     .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
+    .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
     .addItem('Clean up query-test sheets', 'ui_cleanup_query_test_sheets')
     .addToUi()
@@ -165,6 +166,14 @@ function ui_render_weekly_ss_report() {
   return uiRunWrapped_('ui_render_weekly_ss_report', () => {
     runSteps_([
       { name: 'render_weekly_ss_report', fn: render_weekly_ss_report }
+    ])
+  })
+}
+
+function ui_render_middle_earth() {
+  return uiRunWrapped_('ui_render_middle_earth', () => {
+    runSteps_([
+      { name: 'render_middle_earth', fn: render_middle_earth }
     ])
   })
 }

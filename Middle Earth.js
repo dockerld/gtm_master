@@ -1,27 +1,27 @@
 /**************************************************************
- * Canon Orgs Query (TEST / verification)
+ * Middle Earth
  *
- * Runs a PostHog HogQL query that builds a slimmed canon_orgs
- * server-side and writes the result to a NEW sheet for
- * verification against the existing build_canon_orgs pipeline
- * before any swap.
+ * Builds the "Middle Earth" sheet from a single PostHog HogQL query
+ * (org identity, owner, paying/seats, promo, billing, health score).
+ * This replaces the old combine-based render_middle_earth_view.
  *
- * - Does NOT touch the real "canon_orgs" sheet.
- * - Headers come straight from the query's returned columns.
- * - Run via menu: Ping Ops → "TEST: Canon Orgs from PostHog query"
- *   or run render_canon_orgs_query_test() directly in the editor.
+ * Run via menu: Ping Ops → "Render Middle Earth"
+ *   or run render_middle_earth() directly in the editor.
  *
- * Script Properties used (same as the rest of the PostHog code):
+ * org_id  = internal DB id (orgs.id)
+ * app_org_id = WorkOS external id (coalesce(workos_id, external_id))
+ *
+ * Script Properties used:
  *  - POSTHOG_API_KEY
  *  - POSTHOG_PROJECT_ID (optional; falls back to POSTHOG_RAW_CFG)
+ * Uses sauronQueryRun_ (defined in "Sauron Query.js").
  **************************************************************/
 
-const CANON_ORGS_QUERY_CFG = {
+const MIDDLE_EARTH_CFG = {
   OUT_SHEET: 'Middle Earth'
 }
 
-// Query kept verbatim.
-const CANON_ORGS_QUERY_HOGQL = `
+const MIDDLE_EARTH_HOGQL = `
 WITH
 picked AS (  -- one sub per org: active → real trial → latest
   SELECT org_id, stripe_customer_id, owner_user_id,
@@ -80,10 +80,10 @@ LIMIT 1000
 `
 
 /**
- * Run the canon_orgs query and dump it to the test sheet.
+ * Run the Middle Earth query and write the "Middle Earth" sheet.
  * Returns { rows_in, rows_out } for pipeline-style logging.
  */
-function render_canon_orgs_query_test() {
+function render_middle_earth() {
   const t0 = new Date()
   const ss = SpreadsheetApp.getActive()
 
@@ -93,7 +93,7 @@ function render_canon_orgs_query_test() {
   const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
 
   // Reuse the columns-aware HogQL runner (defined in Sauron Query.js).
-  const { columns, results } = sauronQueryRun_(apiKey, projectId, CANON_ORGS_QUERY_HOGQL, 'canon_orgs_query_test')
+  const { columns, results } = sauronQueryRun_(apiKey, projectId, MIDDLE_EARTH_HOGQL, 'render_middle_earth')
 
   const headers = (columns && columns.length) ? columns : ['(no columns returned)']
 
@@ -103,7 +103,7 @@ function render_canon_orgs_query_test() {
     return row
   })
 
-  const sh = ss.getSheetByName(CANON_ORGS_QUERY_CFG.OUT_SHEET) || ss.insertSheet(CANON_ORGS_QUERY_CFG.OUT_SHEET)
+  const sh = ss.getSheetByName(MIDDLE_EARTH_CFG.OUT_SHEET) || ss.insertSheet(MIDDLE_EARTH_CFG.OUT_SHEET)
   sh.clearContents()
   sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#F3F4F6')
   sh.setFrozenRows(1)
@@ -116,6 +116,6 @@ function render_canon_orgs_query_test() {
   }
   try { sh.autoResizeColumns(1, headers.length) } catch (e) {}
 
-  Logger.log(`render_canon_orgs_query_test: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
+  Logger.log(`render_middle_earth: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
   return { rows_in: rows.length, rows_out: rows.length }
 }
