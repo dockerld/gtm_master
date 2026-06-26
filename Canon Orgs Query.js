@@ -1,0 +1,121 @@
+/**************************************************************
+ * Canon Orgs Query (TEST / verification)
+ *
+ * Runs a PostHog HogQL query that builds a slimmed canon_orgs
+ * server-side and writes the result to a NEW sheet for
+ * verification against the existing build_canon_orgs pipeline
+ * before any swap.
+ *
+ * - Does NOT touch the real "canon_orgs" sheet.
+ * - Headers come straight from the query's returned columns.
+ * - Run via menu: Ping Ops → "TEST: Canon Orgs from PostHog query"
+ *   or run render_canon_orgs_query_test() directly in the editor.
+ *
+ * Script Properties used (same as the rest of the PostHog code):
+ *  - POSTHOG_API_KEY
+ *  - POSTHOG_PROJECT_ID (optional; falls back to POSTHOG_RAW_CFG)
+ **************************************************************/
+
+const CANON_ORGS_QUERY_CFG = {
+  OUT_SHEET: 'canon_orgs (Query Test)'
+}
+
+// Query kept verbatim.
+const CANON_ORGS_QUERY_HOGQL = `
+WITH
+picked AS (  -- one sub per org: active → real trial → latest
+  SELECT org_id, stripe_customer_id, owner_user_id,
+         coalesce(full_seat_count,0)+coalesce(lite_seat_count,0) AS seats, trial_ends_at
+  FROM postgres.org_subscriptions
+  ORDER BY (status='active') DESC, (status='trialing' AND trial_ends_at > now()) DESC, created_at DESC
+  LIMIT 1 BY org_id
+),
+sub_agg AS (SELECT org_id, arrayStringConcat(groupUniqArray(stripe_subscription_id), ', ') AS stripe_subscription_ids FROM postgres.org_subscriptions GROUP BY org_id),
+paid_subs AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
+ssub AS (SELECT id, canceled_at, status FROM stripe.subscription LIMIT 1 BY id),
+paying_sub AS (SELECT osb.org_id AS org_id, coalesce(osb.full_seat_count,0)+coalesce(osb.lite_seat_count,0) AS seats
+  FROM postgres.org_subscriptions osb JOIN ssub ON ssub.id=osb.stripe_subscription_id
+  WHERE osb.stripe_subscription_id IN (SELECT subscription_id FROM paid_subs)
+    AND osb.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl)
+    AND NOT (ssub.status='canceled' OR (ssub.canceled_at IS NOT NULL AND ssub.canceled_at < now()))),
+seats_paying AS (SELECT org_id, sum(seats) AS stripe_seats_paying_sum, count()>0 AS is_paying FROM paying_sub GROUP BY org_id),
+promo AS (SELECT pr.org_id AS org_id, argMax(pc.code, pr.redeemed_at) AS promo_code,
+          arrayStringConcat(groupUniqArray(pc.code), ', ') AS app_promo_codes
+          FROM postgres.promo_redemptions pr JOIN postgres.promo_codes pc ON pc.id=pr.promo_code_id GROUP BY pr.org_id),
+u AS (SELECT id, email, name FROM postgres.users LIMIT 1 BY id),
+cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
+hc AS (SELECT workos_org_id, max(health_score) AS health_score FROM hubspot.companies GROUP BY workos_org_id)
+SELECT
+  coalesce(nullIf(o.workos_id,''), o.external_id) AS org_id,   -- WorkOS-first, falls back to external_id
+  o.id                                            AS app_org_id,
+  o.name                                          AS org_name,
+  ''                                              AS org_slug,           -- not in DB (see below)
+  o.created_at                                    AS org_created_at,
+  picked.owner_user_id                            AS owner_user_id,
+  u.email                                         AS owner_email,
+  u.name                                          AS owner_name,
+  if(coalesce(sp.is_paying,0)=1,'yes','no')       AS is_paying,
+  coalesce(picked.seats,0)                        AS seats,
+  coalesce(promo.promo_code,'')                   AS promo_code,
+  cust.email                                      AS billing_email,
+  picked.stripe_customer_id                       AS billing_customer_id,
+  sub_agg.stripe_subscription_ids                 AS stripe_subscription_ids,
+  picked.stripe_customer_id                       AS stripe_customer_id,
+  coalesce(sp.stripe_seats_paying_sum,0)          AS stripe_seats_paying_sum,
+  picked.trial_ends_at                            AS trial_ends_at,
+  hc.health_score                                 AS health_score,
+  coalesce(promo.app_promo_codes,'')              AS app_promo_codes,
+  o.updated_at                                    AS updated_at
+FROM (SELECT id, name, created_at, updated_at, workos_id, external_id FROM postgres.orgs LIMIT 1 BY id) o
+LEFT JOIN picked       ON picked.org_id = o.id
+LEFT JOIN sub_agg      ON sub_agg.org_id = o.id
+LEFT JOIN seats_paying sp ON sp.org_id = o.id
+LEFT JOIN promo        ON promo.org_id = o.id
+LEFT JOIN u            ON u.id = picked.owner_user_id
+LEFT JOIN cust         ON cust.id = picked.stripe_customer_id
+LEFT JOIN hc           ON hc.workos_org_id = o.workos_id
+ORDER BY is_paying DESC, org_name
+LIMIT 1000
+`
+
+/**
+ * Run the canon_orgs query and dump it to the test sheet.
+ * Returns { rows_in, rows_out } for pipeline-style logging.
+ */
+function render_canon_orgs_query_test() {
+  const t0 = new Date()
+  const ss = SpreadsheetApp.getActive()
+
+  const props = PropertiesService.getScriptProperties()
+  const apiKey = props.getProperty('POSTHOG_API_KEY')
+  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+
+  // Reuse the columns-aware HogQL runner (defined in Sauron Query.js).
+  const { columns, results } = sauronQueryRun_(apiKey, projectId, CANON_ORGS_QUERY_HOGQL, 'canon_orgs_query_test')
+
+  const headers = (columns && columns.length) ? columns : ['(no columns returned)']
+
+  const rows = (results || []).map(r => {
+    const row = new Array(headers.length)
+    for (let i = 0; i < headers.length; i++) row[i] = (r && r[i] != null) ? r[i] : ''
+    return row
+  })
+
+  const sh = ss.getSheetByName(CANON_ORGS_QUERY_CFG.OUT_SHEET) || ss.insertSheet(CANON_ORGS_QUERY_CFG.OUT_SHEET)
+  sh.clearContents()
+  sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold').setBackground('#F3F4F6')
+  sh.setFrozenRows(1)
+  if (rows.length) {
+    const chunk = 5000
+    for (let i = 0; i < rows.length; i += chunk) {
+      const part = rows.slice(i, i + chunk)
+      sh.getRange(2 + i, 1, part.length, headers.length).setValues(part)
+    }
+  }
+  try { sh.autoResizeColumns(1, headers.length) } catch (e) {}
+
+  Logger.log(`render_canon_orgs_query_test: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
+  return { rows_in: rows.length, rows_out: rows.length }
+}
