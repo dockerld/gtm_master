@@ -57,6 +57,7 @@ function onOpen() {
     .addItem('TEST: Sauron from PostHog query', 'ui_render_sauron_query_test')
     .addItem('TEST: Org Sub Info from PostHog query', 'ui_render_org_sub_info_query_test')
     .addItem('TEST: Canon Orgs from PostHog query', 'ui_render_canon_orgs_query_test')
+    .addItem('TEST: ARR Raw Data from PostHog query', 'ui_render_arr_raw_data_query_test')
     .addToUi()
 }
 
@@ -191,6 +192,14 @@ function ui_render_canon_orgs_query_test() {
   return uiRunWrapped_('ui_render_canon_orgs_query_test', () => {
     runSteps_([
       { name: 'render_canon_orgs_query_test', fn: render_canon_orgs_query_test }
+    ])
+  })
+}
+
+function ui_render_arr_raw_data_query_test() {
+  return uiRunWrapped_('ui_render_arr_raw_data_query_test', () => {
+    runSteps_([
+      { name: 'render_arr_raw_data_query_test', fn: render_arr_raw_data_query_test }
     ])
   })
 }
