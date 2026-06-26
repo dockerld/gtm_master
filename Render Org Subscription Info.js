@@ -24,8 +24,11 @@ const ORG_SUB_INFO_CFG = {
   CURRENCY_FMT: '$#,##0.00'
 }
 
-function render_org_subscription_info() {
-  return ORGSUBINFO_lockWrap_('render_org_subscription_info', () => {
+// Legacy combine-based builder (raw_posthog_orgs + raw_stripe + promo +
+// raw_posthog_org_subscriptions). Kept as a fallback; the pipeline now uses the
+// query-based render_org_subscription_info() in "Org Sub Info Query.js".
+function render_org_subscription_info_legacy_() {
+  return ORGSUBINFO_lockWrap_('render_org_subscription_info_legacy_', () => {
     const t0 = new Date()
     try {
       const ss = SpreadsheetApp.getActive()

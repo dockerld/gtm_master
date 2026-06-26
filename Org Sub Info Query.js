@@ -17,7 +17,7 @@
  **************************************************************/
 
 const ORG_SUB_INFO_QUERY_CFG = {
-  OUT_SHEET: 'org_subscription_info (Query Test)'
+  OUT_SHEET: 'org_subscription_info'
 }
 
 // Query kept verbatim (the `interval` identifier's backticks are escaped for
@@ -98,10 +98,12 @@ LIMIT 500
 `
 
 /**
- * Run the org-subscription query and dump it to the test sheet.
+ * Build the LIVE org_subscription_info sheet from the PostHog query.
+ * (Pipeline part1 calls this; the old combine builder is preserved as
+ * render_org_subscription_info_legacy_ in "Render Org Subscription Info.js".)
  * Returns { rows_in, rows_out } for pipeline-style logging.
  */
-function render_org_sub_info_query_test() {
+function render_org_subscription_info() {
   const t0 = new Date()
   const ss = SpreadsheetApp.getActive()
 
@@ -111,7 +113,7 @@ function render_org_sub_info_query_test() {
   const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
 
   // Reuse the columns-aware HogQL runner (defined in Sauron Query.js).
-  const { columns, results } = sauronQueryRun_(apiKey, projectId, ORG_SUB_INFO_QUERY_HOGQL, 'org_sub_info_query_test')
+  const { columns, results } = sauronQueryRun_(apiKey, projectId, ORG_SUB_INFO_QUERY_HOGQL, 'render_org_subscription_info')
 
   const headers = (columns && columns.length) ? columns : ['(no columns returned)']
 
@@ -134,6 +136,9 @@ function render_org_sub_info_query_test() {
   }
   try { sh.autoResizeColumns(1, headers.length) } catch (e) {}
 
-  Logger.log(`render_org_sub_info_query_test: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
+  if (typeof writeSyncLog === 'function') {
+    writeSyncLog('render_org_subscription_info', 'ok', rows.length, rows.length, (new Date() - t0) / 1000, '')
+  }
+  Logger.log(`render_org_subscription_info: ${rows.length} rows in ${((new Date() - t0) / 1000).toFixed(1)}s`)
   return { rows_in: rows.length, rows_out: rows.length }
 }
