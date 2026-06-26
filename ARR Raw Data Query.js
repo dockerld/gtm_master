@@ -63,17 +63,17 @@ final AS (
 SELECT
   org_id,
   org_name,
-  org_creation_date,
-  first_payment_date,
-  churn_date,
-  formatDateTime(org_creation_date,'%b %Y') AS sign_up_cohort_month,
+  formatDateTime(org_creation_date, '%Y-%m-%d %H:%i:%S') AS org_creation_date,
+  if(first_payment_date IS NOT NULL, formatDateTime(first_payment_date, '%Y-%m-%d %H:%i:%S'), '') AS first_payment_date,
+  if(churn_date IS NOT NULL, formatDateTime(churn_date, '%Y-%m-%d %H:%i:%S'), '') AS churn_date,
+  formatDateTime(org_creation_date, '%b %Y') AS sign_up_cohort_month,
   if(ring_bucket='paid' AND first_payment_date IS NOT NULL, formatDateTime(first_payment_date,'%b %Y'), '') AS paid_cohort_month,
   current_status,
   ring_bucket,
   plan_name,
   billing_frequency,
   if(ring_bucket='paid', arr_paid, 0) AS total_arr,
-  subscription_start_date
+  formatDateTime(subscription_start_date, '%Y-%m-%d %H:%i:%S') AS subscription_start_date
 FROM final
 WHERE ring_bucket != ''
 ORDER BY total_arr DESC
