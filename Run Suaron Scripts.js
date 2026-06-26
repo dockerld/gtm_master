@@ -37,12 +37,10 @@ const PIPELINE_PART2_STEPS_ = [
   { name: 'render_arr_raw_data_view',              fn: () => render_arr_raw_data_view() },
   { name: 'write_arr_snapshot',                    fn: () => write_arr_snapshot() },
   { name: 'render_arr_waterfall_facts',            fn: () => render_arr_waterfall_facts() },
-  { name: 'render_paying_users_snapshot',          fn: () => render_paying_users_snapshot() },
 
   { name: 'render_ring_view',                      fn: () => render_ring_view() },
   { name: 'render_all_stats_view',                 fn: () => render_all_stats_view() },
 
-  { name: 'render_conversion_onboarding_stats',    fn: () => render_conversion_onboarding_stats() },
   { name: 'render_csm_commission_report',          fn: () => render_csm_commission_report() }
 ]
 

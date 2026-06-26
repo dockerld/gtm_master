@@ -46,7 +46,6 @@ function onOpen() {
     .addItem('Run only Stripe', 'ui_run_only_stripe')
     .addItem('Run The Ring only', 'ui_run_only_ring')
     .addItem('Render All the Stats', 'ui_render_all_stats')
-    .addItem('Publish The Good Stuff', 'ui_publish_the_good_stuff')
     .addSeparator()
     .addItem('Rebuild canon tables', 'ui_rebuild_canon_tables')
     .addSeparator()
@@ -121,14 +120,6 @@ function ui_render_all_stats() {
   return uiRunWrapped_('ui_render_all_stats', () => {
     runSteps_([
       { name: 'render_all_stats_view', fn: render_all_stats_view }
-    ])
-  })
-}
-
-function ui_publish_the_good_stuff() {
-  return uiRunWrapped_('ui_publish_the_good_stuff', () => {
-    runSteps_([
-      { name: 'publish_the_good_stuff', fn: publish_the_good_stuff }
     ])
   })
 }
