@@ -26,7 +26,6 @@ const PIPELINE_PART1_STEPS_ = [
   { name: 'posthog_pull_org_subscriptions_to_raw', fn: () => posthog_pull_org_subscriptions_to_raw() },
   { name: 'posthog_pull_orgs_to_raw',              fn: () => posthog_pull_orgs_to_raw() },
   { name: 'posthog_pull_promo_redemptions_to_raw', fn: () => posthog_pull_promo_redemptions_to_raw() },
-  { name: 'posthog_pull_health_scores_to_raw',     fn: () => posthog_pull_health_scores_to_raw() },
 
   { name: 'render_org_subscription_info',          fn: () => render_org_subscription_info() },
   { name: 'build_canon_orgs',                      fn: () => build_canon_orgs() },
