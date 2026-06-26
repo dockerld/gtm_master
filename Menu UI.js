@@ -51,7 +51,6 @@ function onOpen() {
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
-    .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
     .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
     .addItem('TEST: The Ring from PostHog query', 'ui_render_ring_query_test')
@@ -150,14 +149,6 @@ function ui_generate_csm_commission_report() {
   return uiRunWrapped_('ui_generate_csm_commission_report', () => {
     runSteps_([
       { name: 'render_csm_commission_report', fn: render_csm_commission_report }
-    ])
-  })
-}
-
-function ui_render_weekly_ss_report() {
-  return uiRunWrapped_('ui_render_weekly_ss_report', () => {
-    runSteps_([
-      { name: 'render_weekly_ss_report', fn: render_weekly_ss_report }
     ])
   })
 }
