@@ -94,7 +94,7 @@ LEFT JOIN pm    ON pm.customer_id = os.stripe_customer_id
 LEFT JOIN promo ON promo.org_id = os.org_id
 LEFT JOIN prod  ON prod.id = sx.product_id
 ORDER BY amount DESC
-LIMIT 500
+LIMIT 5000
 `
 
 /**

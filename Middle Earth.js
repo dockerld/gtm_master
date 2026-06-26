@@ -76,7 +76,7 @@ LEFT JOIN u            ON u.id = picked.owner_user_id
 LEFT JOIN cust         ON cust.id = picked.stripe_customer_id
 LEFT JOIN hc           ON hc.workos_org_id = o.workos_id
 ORDER BY is_paying DESC, org_name
-LIMIT 1000
+LIMIT 5000
 `
 
 /**

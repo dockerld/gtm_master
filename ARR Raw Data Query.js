@@ -75,5 +75,5 @@ SELECT
 FROM final
 WHERE final.ring_bucket != ''
 ORDER BY total_arr DESC
-LIMIT 1000
+LIMIT 5000
 `
