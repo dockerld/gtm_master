@@ -17,7 +17,7 @@
  **************************************************************/
 
 const CANON_ORGS_QUERY_CFG = {
-  OUT_SHEET: 'canon_orgs (Query Test)'
+  OUT_SHEET: 'Middle Earth'
 }
 
 // Query kept verbatim.
