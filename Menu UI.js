@@ -53,7 +53,6 @@ function onOpen() {
     .addItem('Generate CSM Commission Report', 'ui_generate_csm_commission_report')
     .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
-    .addItem('TEST: The Ring from PostHog query', 'ui_render_ring_query_test')
     .addItem('Clean up query-test sheets', 'ui_cleanup_query_test_sheets')
     .addToUi()
 }
@@ -161,14 +160,6 @@ function ui_render_middle_earth() {
   })
 }
 
-function ui_render_ring_query_test() {
-  return uiRunWrapped_('ui_render_ring_query_test', () => {
-    runSteps_([
-      { name: 'render_ring_query_test', fn: render_ring_query_test }
-    ])
-  })
-}
-
 function ui_cleanup_query_test_sheets() {
   return uiRunWrapped_('ui_cleanup_query_test_sheets', () => {
     cleanup_query_test_sheets()
@@ -187,7 +178,8 @@ function cleanup_query_test_sheets() {
     'arr_waterfall_facts (Test)',
     'Sauron (Query Test)',
     'org_subscription_info (Query Test)',
-    'canon_orgs (Query Test)'
+    'canon_orgs (Query Test)',
+    'The Ring (Query Test)'
   ]
   const deleted = []
   names.forEach(n => {

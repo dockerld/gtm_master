@@ -1,8 +1,9 @@
 /**************************************************************
- * Ring Query (TEST / verification)
+ * Ring Queries (PRODUCTION)
  *
- * Two PostHog HogQL queries that rebuild "The Ring" — kept EXACTLY in
- * sync with the HubSpot Ring logic (dashboard tile 0wTWWPar):
+ * The two HogQL queries that build the live "The Ring" sheet, used by
+ * render_ring_view() in "Render The Ring.js". Kept EXACTLY in sync with
+ * the HubSpot Ring logic (dashboard tile 0wTWWPar):
  *   (A) RING SUMMARY  -> 3 rows: Paid / Card Info Entered / Trialing
  *   (B) RING DETAIL   -> one row per org (all three statuses)
  *
@@ -13,17 +14,7 @@
  *   - MANAGED orgs (override sheet exclude_reason='managed') are valued at the
  *     override sheet's `amount` column (NOT run-rate). Applied inside org_arr.
  *   - Card Info Entered / Trialing ARR = POTENTIAL (plan list price annualized).
- *
- * Writes both to "The Ring (Query Test)" (summary block on top, detail below)
- * for verification against the live render_ring_view. Does NOT touch the real
- * "The Ring" sheet. Uses sauronQueryRun_ (defined in "Sauron Query.js").
- *
- * Run via menu: Ping Ops -> "TEST: The Ring from PostHog query"
  **************************************************************/
-
-const RING_QUERY_CFG = {
-  OUT_SHEET: 'The Ring (Query Test)'
-}
 
 // (A) RING SUMMARY — 3 rows: Paid / Card Info Entered / Trialing
 const RING_SUMMARY_HOGQL = `
@@ -77,61 +68,3 @@ FROM staged WHERE status!=''
 ORDER BY multiIf(status='Paid',1, status='Card Info Entered',2, 3), arr DESC
 LIMIT 5000
 `
-
-/**
- * Run both Ring queries and write them to the test sheet:
- * summary block on top, then a gap, then the detail block.
- */
-function render_ring_query_test() {
-  const t0 = new Date()
-  const ss = SpreadsheetApp.getActive()
-
-  const props = PropertiesService.getScriptProperties()
-  const apiKey = props.getProperty('POSTHOG_API_KEY')
-  if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
-  const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
-
-  const summary = sauronQueryRun_(apiKey, projectId, RING_SUMMARY_HOGQL, 'ring_summary')
-  const detail = sauronQueryRun_(apiKey, projectId, RING_DETAIL_HOGQL, 'ring_detail')
-
-  const sh = ss.getSheetByName(RING_QUERY_CFG.OUT_SHEET) || ss.insertSheet(RING_QUERY_CFG.OUT_SHEET)
-  sh.clear()
-
-  const norm = (results, width) => (results || []).map(r => {
-    const row = new Array(width)
-    for (let i = 0; i < width; i++) row[i] = (r && r[i] != null) ? r[i] : ''
-    return row
-  })
-
-  // --- Summary block ---
-  const sumHeaders = (summary.columns && summary.columns.length) ? summary.columns : ['(no columns)']
-  let row = 1
-  sh.getRange(row, 1, 1, 1).setValues([['SUMMARY']]).setFontWeight('bold')
-  row++
-  sh.getRange(row, 1, 1, sumHeaders.length).setValues([sumHeaders]).setFontWeight('bold').setBackground('#F3F4F6')
-  row++
-  const sumRows = norm(summary.results, sumHeaders.length)
-  if (sumRows.length) { sh.getRange(row, 1, sumRows.length, sumHeaders.length).setValues(sumRows); row += sumRows.length }
-
-  // gap
-  row += 2
-
-  // --- Detail block ---
-  const detHeaders = (detail.columns && detail.columns.length) ? detail.columns : ['(no columns)']
-  sh.getRange(row, 1, 1, 1).setValues([['DETAIL']]).setFontWeight('bold')
-  row++
-  sh.getRange(row, 1, 1, detHeaders.length).setValues([detHeaders]).setFontWeight('bold').setBackground('#F3F4F6')
-  row++
-  const detRows = norm(detail.results, detHeaders.length)
-  if (detRows.length) {
-    const chunk = 5000
-    for (let i = 0; i < detRows.length; i += chunk) {
-      const part = detRows.slice(i, i + chunk)
-      sh.getRange(row + i, 1, part.length, detHeaders.length).setValues(part)
-    }
-  }
-  try { sh.autoResizeColumns(1, Math.max(detHeaders.length, sumHeaders.length)) } catch (e) {}
-
-  Logger.log(`render_ring_query_test: summary=${sumRows.length} detail=${detRows.length} in ${((new Date() - t0) / 1000).toFixed(1)}s`)
-  return { rows_in: detRows.length, rows_out: detRows.length }
-}
