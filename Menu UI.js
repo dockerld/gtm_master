@@ -54,6 +54,7 @@ function onOpen() {
     .addItem('Render Weekly SS Report', 'ui_render_weekly_ss_report')
     .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
+    .addItem('TEST: The Ring from PostHog query', 'ui_render_ring_query_test')
     .addItem('Clean up query-test sheets', 'ui_cleanup_query_test_sheets')
     .addToUi()
 }
@@ -165,6 +166,14 @@ function ui_render_middle_earth() {
   return uiRunWrapped_('ui_render_middle_earth', () => {
     runSteps_([
       { name: 'render_middle_earth', fn: render_middle_earth }
+    ])
+  })
+}
+
+function ui_render_ring_query_test() {
+  return uiRunWrapped_('ui_render_ring_query_test', () => {
+    runSteps_([
+      { name: 'render_ring_query_test', fn: render_ring_query_test }
     ])
   })
 }
