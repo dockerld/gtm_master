@@ -46,9 +46,14 @@ function write_arr_snapshot_monthly(cfgOverride) {
     if (!src) throw new Error(`Source sheet not found: ${CFG.SOURCE_SHEET}`)
 
     const snap = getOrCreateSheetCompat_(ss, CFG.SNAP_SHEET)
-    ARR_snap_pruneLatestIfNotMonthStart_(snap)
 
-    const snapshotDate = ARR_snap_utcDateStr_(new Date())
+    // Always stamp the 1st of the current month (UTC), idempotently. The first
+    // run of any month records that month as YYYY-MM-01; the snapshotDate|org_id
+    // dedupe below makes every later run that month a no-op. This means we no
+    // longer have to land on the literal 1st — running any day that month
+    // captures it (prevents the "missed a month" gap). No prune needed.
+    const _now = new Date()
+    const snapshotDate = _now.getUTCFullYear() + '-' + ARR_monthly_pad2_(_now.getUTCMonth() + 1) + '-01'
 
     const maxColsFromStart = src.getLastColumn() - CFG.START_COL + 1
     if (maxColsFromStart <= 0) throw new Error('arr_raw_data has no columns in the expected region')
