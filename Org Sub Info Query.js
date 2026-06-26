@@ -47,9 +47,10 @@ pm AS (SELECT customer_id, min(created_at) AS pm_created FROM stripe.customerpay
 promo AS (SELECT pr.org_id AS org_id, count() AS n_promo, argMax(pc.code, pr.redeemed_at) AS promo_code, argMax(pc.name, pr.redeemed_at) AS promo_name, argMax(pc.trial_days, pr.redeemed_at) AS promo_trial_days, max(pr.redeemed_at) AS redeemed_at FROM postgres.promo_redemptions pr JOIN postgres.promo_codes pc ON pc.id=pr.promo_code_id GROUP BY pr.org_id),
 prod AS (SELECT id, name FROM stripe.product LIMIT 1 BY id),
 cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
-orgs AS (SELECT id, name, created_at FROM postgres.orgs LIMIT 1 BY id)
+orgs AS (SELECT id, name, created_at, workos_id, external_id FROM postgres.orgs LIMIT 1 BY id)
 SELECT
-  os.org_id                                            AS app_org_id,
+  os.org_id                                            AS org_id,        -- internal DB id
+  coalesce(nullIf(orgs.workos_id,''), orgs.external_id) AS app_org_id,    -- WorkOS external id (fallback external_id)
   orgs.name                                            AS org_name,
   orgs.created_at                                      AS org_created_at,
   os.latest_subscription_id                            AS latest_subscription_id,

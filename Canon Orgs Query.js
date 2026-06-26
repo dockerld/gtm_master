@@ -47,8 +47,8 @@ u AS (SELECT id, email, name FROM postgres.users LIMIT 1 BY id),
 cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
 hc AS (SELECT workos_org_id, max(health_score) AS health_score FROM hubspot.companies GROUP BY workos_org_id)
 SELECT
-  coalesce(nullIf(o.workos_id,''), o.external_id) AS org_id,   -- WorkOS-first, falls back to external_id
-  o.id                                            AS app_org_id,
+  o.id                                            AS org_id,        -- internal DB id
+  coalesce(nullIf(o.workos_id,''), o.external_id) AS app_org_id,    -- WorkOS external id (fallback external_id)
   o.name                                          AS org_name,
   ''                                              AS org_slug,           -- not in DB (see below)
   o.created_at                                    AS org_created_at,
