@@ -32,6 +32,7 @@ sx AS (SELECT id AS sub_id, start_date AS sub_start, coalesce(nullIf(plan.interv
 pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
 prod AS (SELECT id, name FROM stripe.product LIMIT 1 BY id),
 orgs AS (SELECT id, name, created_at FROM postgres.orgs LIMIT 1 BY id),
+managed_ovr AS (SELECT subscription_id, toFloat64OrNull(replaceRegexpAll(coalesce(amount,''),'[^0-9.]','')) AS ovr_arr FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason)='managed' AND subscription_id IS NOT NULL),
 assembled AS (
   SELECT o.id AS org_id, o.name AS org_name, o.created_at AS org_creation_date,
     fp_org.first_payment_at AS first_payment_date,
@@ -40,9 +41,9 @@ assembled AS (
     multiIf(sx.intv='year','yearly', sx.intv='month','monthly', sx.intv) AS billing_frequency,
     coalesce(sx.sub_start, picked.sub_created) AS subscription_start_date,
     (pm.customer_id IS NOT NULL) AS has_pm,
-    (fp_org.org_id IS NOT NULL) AS has_fp,
+    (fp_org.org_id IS NOT NULL OR (mo.subscription_id IS NOT NULL AND mo.ovr_arr>0)) AS has_fp,
     (picked.app_status IN ('active','trialing')) AS is_live,
-    coalesce(org_arr.total_arr_paid,0) AS arr_paid
+    if(mo.subscription_id IS NOT NULL AND mo.ovr_arr IS NOT NULL, mo.ovr_arr, coalesce(org_arr.total_arr_paid,0)) AS arr_paid
   FROM orgs o
   LEFT JOIN picked  ON picked.org_id = o.id
   LEFT JOIN sx      ON sx.sub_id = picked.stripe_subscription_id
@@ -50,6 +51,7 @@ assembled AS (
   LEFT JOIN org_arr ON org_arr.org_id = o.id
   LEFT JOIN pm      ON pm.customer_id = picked.stripe_customer_id
   LEFT JOIN prod    ON prod.id = sx.product_id
+  LEFT JOIN managed_ovr mo ON mo.subscription_id = picked.stripe_subscription_id
 ),
 final AS (
   SELECT *,
