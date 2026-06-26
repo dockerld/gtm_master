@@ -76,7 +76,7 @@ SELECT
   if(ring_bucket='paid', arr_paid, 0) AS total_arr,
   subscription_start_date
 FROM final
-WHERE ring_bucket != ''
+WHERE ring_bucket IN ('paid','intent_to_pay')
 ORDER BY total_arr DESC
 LIMIT 1000
 `
