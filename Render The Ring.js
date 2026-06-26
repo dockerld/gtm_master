@@ -123,7 +123,70 @@ const RING_CFG = {
 const RING_AUTO_PUBLISH_GOOD_STUFF = true
 
 function render_ring_view() {
-  lockWrapCompat_('render_ring_view', () => {
+  return lockWrapCompat_('render_ring_view', () => {
+    const t0 = new Date()
+    try {
+      const ss = SpreadsheetApp.getActive()
+      const sh = getOrCreateSheetCompat_(ss, RING_CFG.SHEET_NAME)
+
+      const props = PropertiesService.getScriptProperties()
+      const apiKey = props.getProperty('POSTHOG_API_KEY')
+      if (!apiKey) throw new Error('Missing POSTHOG_API_KEY in Script Properties')
+      const projectId = props.getProperty('POSTHOG_PROJECT_ID') || POSTHOG_RAW_CFG.PROJECT_ID_FALLBACK
+
+      // Summary (3 buckets) + per-org detail, straight from the HubSpot-matched
+      // HogQL queries (defined in "Ring Query.js"). Managed orgs valued at the
+      // override sheet amount; ARR net of discounts; status from app DB.
+      const summary = sauronQueryRun_(apiKey, projectId, RING_SUMMARY_HOGQL, 'render_ring_view_summary')
+      const detail = sauronQueryRun_(apiKey, projectId, RING_DETAIL_HOGQL, 'render_ring_view_detail')
+
+      // Map the 3 summary rows -> KPI bucket objects by status.
+      const sIdx = {}
+      ;(summary.columns || []).forEach((c, i) => { sIdx[String(c).toLowerCase()] = i })
+      const mkBucket = (st) => {
+        const r = (summary.results || []).find(x => String(x[sIdx['status']] || '') === st)
+        return r
+          ? { arr: Number(r[sIdx['arr']] || 0), subscriptions: Number(r[sIdx['subscriptions']] || 0), totalSeats: Number(r[sIdx['total_seats']] || 0) }
+          : { arr: 0, subscriptions: 0, totalSeats: 0 }
+      }
+
+      // Map detail rows -> RING_CFG.HEADERS order.
+      const dIdx = {}
+      ;(detail.columns || []).forEach((c, i) => { dIdx[String(c).toLowerCase()] = i })
+      const detailOrder = ['customer_email','customer_name','org_name','status','sign_up_date','first_payment_at','trial_days_remaining','interval','arr','seats']
+      const outRows = (detail.results || []).map(r => detailOrder.map(c => {
+        const i = dIdx[c]
+        const v = (i == null) ? '' : r[i]
+        return v == null ? '' : v
+      }))
+
+      // Clean rebuild + same layout as before (KPI boxes rows 1-2, header row 3, data row 4)
+      sh.clear()
+      writeKpis_(sh, {
+        paid: mkBucket('Paid'),
+        promoTrial: mkBucket('Intent to Pay'),
+        freeTrial: mkBucket('Trialing')
+      })
+      sh.getRange(RING_CFG.HEADER_ROW, RING_CFG.START_COL, 1, RING_CFG.HEADERS.length).setValues([RING_CFG.HEADERS])
+      sh.setFrozenRows(RING_CFG.HEADER_ROW)
+      if (outRows.length) batchSetValuesCompat_(sh, RING_CFG.DATA_START_ROW, RING_CFG.START_COL, outRows, 3000)
+      applyRingFormats_(sh, outRows.length)
+      sh.autoResizeColumns(RING_CFG.START_COL, RING_CFG.HEADERS.length)
+
+      writeSyncLogCompat_('render_ring_view', 'ok', outRows.length, outRows.length, (new Date() - t0) / 1000, '')
+      return { rows_in: outRows.length, rows_out: outRows.length }
+    } catch (err) {
+      writeSyncLogCompat_('render_ring_view', 'error', '', '', (new Date() - t0) / 1000, String(err && err.message ? err.message : err))
+      throw err
+    }
+  })
+}
+
+// Legacy combine-based Ring builder (raw_stripe + canon_orgs + clerk +
+// org_subscription_info + promo). Preserved as a fallback; the live
+// render_ring_view above now builds from the HubSpot-matched HogQL queries.
+function render_ring_view_legacy_() {
+  lockWrapCompat_('render_ring_view_legacy_', () => {
     const t0 = new Date()
     try {
       const ss = SpreadsheetApp.getActive()
