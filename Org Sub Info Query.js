@@ -20,22 +20,80 @@ const ORG_SUB_INFO_QUERY_CFG = {
   OUT_SHEET: 'org_subscription_info (Query Test)'
 }
 
-// CTE kept verbatim; wrapped with a final SELECT so it runs standalone.
+// Query kept verbatim (the `interval` identifier's backticks are escaped for
+// the JS template literal). Full org_subscription_info equivalent.
 const ORG_SUB_INFO_QUERY_HOGQL = `
-WITH os AS (
+WITH
+os AS (   -- one sub per org: active → real trial → latest
   SELECT org_id, id AS latest_subscription_id, stripe_subscription_id, status AS app_status,
          created_at AS sub_created, trial_ends_at, current_period_end, cancel_at_period_end, stripe_customer_id
   FROM postgres.org_subscriptions
-  ORDER BY (status = 'active') DESC,                              -- 1. active wins
-           (status = 'trialing' AND trial_ends_at > now()) DESC,  -- 2. then a real (non-stale) trial
-           created_at DESC                                        -- 3. else latest
+  ORDER BY (status='active') DESC, (status='trialing' AND trial_ends_at > now()) DESC, created_at DESC
   LIMIT 1 BY org_id
-)
-SELECT org_id, latest_subscription_id, stripe_subscription_id, app_status,
-       sub_created, trial_ends_at, current_period_end, cancel_at_period_end, stripe_customer_id
+),
+sx AS (   -- stripe sub detail (amounts handle multi-item via items[])
+  SELECT id AS sub_id, customer_id, status AS stripe_status, canceled_at,
+    JSONExtractString(coalesce(cancellation_details,''),'reason') AS churn_reason,
+    trial_end, current_period_end AS cpe, cancel_at_period_end AS cape,
+    coalesce(nullIf(plan.product,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','product')) AS product_id,
+    coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval')) AS intv,
+    coalesce(toInt(nullIf(toString(plan.interval_count),'')), JSONExtractInt(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval_count')) AS intv_count,
+    arraySum(arrayMap(x -> JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS quantity_total,
+    arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount') * JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS amount_cents
+  FROM stripe.subscription LIMIT 1 BY id
+),
+fp AS (SELECT subscription_id, min(created_at) AS first_payment_at FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
+pm AS (SELECT customer_id, min(created_at) AS pm_created FROM stripe.customerpaymentmethod GROUP BY customer_id),
+promo AS (SELECT pr.org_id AS org_id, count() AS n_promo, argMax(pc.code, pr.redeemed_at) AS promo_code, argMax(pc.name, pr.redeemed_at) AS promo_name, argMax(pc.trial_days, pr.redeemed_at) AS promo_trial_days, max(pr.redeemed_at) AS redeemed_at FROM postgres.promo_redemptions pr JOIN postgres.promo_codes pc ON pc.id=pr.promo_code_id GROUP BY pr.org_id),
+prod AS (SELECT id, name FROM stripe.product LIMIT 1 BY id),
+cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
+orgs AS (SELECT id, name, created_at FROM postgres.orgs LIMIT 1 BY id)
+SELECT
+  os.org_id                                            AS app_org_id,
+  orgs.name                                            AS org_name,
+  orgs.created_at                                      AS org_created_at,
+  os.latest_subscription_id                            AS latest_subscription_id,
+  os.stripe_subscription_id                            AS stripe_subscription_id,
+  coalesce(nullIf(sx.stripe_status,''), os.app_status) AS status,
+  toDate(os.sub_created)                               AS subscription_created_at_date,
+  fp.first_payment_at                                  AS first_payment_at,
+  sx.canceled_at                                       AS churn_date,
+  prod.name                                            AS plan_name,
+  os.stripe_customer_id                                AS stripe_customer_id,
+  cust.email                                           AS customer_email,
+  if(pm.customer_id IS NOT NULL,'yes','no')            AS has_payment_method,
+  pm.pm_created                                        AS payment_method_created_at,
+  sx.intv                                              AS \`interval\`,
+  sx.intv_count                                        AS interval_count,
+  sx.quantity_total                                    AS quantity_total,
+  round(sx.amount_cents/nullIf(sx.quantity_total,0)/100.0,2)                                                              AS unit_price,
+  round(sx.amount_cents/100.0,2)                                                                                          AS amount,
+  round(multiIf(sx.intv='month', sx.amount_cents/nullIf(sx.quantity_total,0), sx.intv='year', sx.amount_cents/nullIf(sx.quantity_total,0)/12, sx.amount_cents/nullIf(sx.quantity_total,0))/100.0,2) AS unit_price_monthly,
+  round(multiIf(sx.intv='month', sx.amount_cents/nullIf(sx.quantity_total,0)*12, sx.intv='year', sx.amount_cents/nullIf(sx.quantity_total,0), sx.amount_cents/nullIf(sx.quantity_total,0))/100.0,2) AS unit_price_yearly,
+  round(multiIf(sx.intv='month', sx.amount_cents, sx.intv='year', sx.amount_cents/12, sx.amount_cents)/100.0,2)          AS amount_monthly,
+  round(multiIf(sx.intv='month', sx.amount_cents*12, sx.intv='year', sx.amount_cents, sx.amount_cents)/100.0,2)          AS amount_yearly,
+  coalesce(sx.trial_end, os.trial_ends_at)             AS trial_ends_at,
+  coalesce(sx.cpe, os.current_period_end)              AS current_period_end,
+  greatest(0, dateDiff('day', now(), coalesce(sx.trial_end, os.trial_ends_at))) AS trial_days_remaining,
+  if(coalesce(promo.n_promo,0)>0,'yes','no')           AS promo_used,
+  coalesce(promo.promo_code,'')                        AS last_promo_used,
+  ''                                                   AS redemption_location,
+  promo.redeemed_at                                    AS redeemed_at,
+  coalesce(promo.promo_code,'')                        AS promo_code,
+  coalesce(promo.promo_name,'')                        AS promo_name,
+  promo.promo_trial_days                               AS trial_days,
+  coalesce(sx.cape, os.cancel_at_period_end)           AS cancel_at_period_end,
+  sx.churn_reason                                      AS churn_reason
 FROM os
-ORDER BY org_id
-LIMIT 5000
+LEFT JOIN sx    ON sx.sub_id = os.stripe_subscription_id
+LEFT JOIN orgs  ON orgs.id = os.org_id
+LEFT JOIN fp    ON fp.subscription_id = os.stripe_subscription_id
+LEFT JOIN cust  ON cust.id = os.stripe_customer_id
+LEFT JOIN pm    ON pm.customer_id = os.stripe_customer_id
+LEFT JOIN promo ON promo.org_id = os.org_id
+LEFT JOIN prod  ON prod.id = sx.product_id
+ORDER BY amount DESC
+LIMIT 500
 `
 
 /**
