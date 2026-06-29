@@ -42,6 +42,7 @@ function onOpen() {
     .addSeparator()
     .addItem('Run ARR refresh', 'ui_run_arr_refresh')
     .addItem('Render The Ring', 'ui_run_only_ring')
+    .addItem('Publish The Good Stuff', 'ui_publish_the_good_stuff')
     .addItem('Render All the Stats', 'ui_render_all_stats')
     .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
@@ -132,6 +133,14 @@ function ui_run_arr_refresh() {
       { name: 'render_arr_raw_data_view', fn: render_arr_raw_data_view },
       { name: 'write_arr_snapshot', fn: write_arr_snapshot },
       { name: 'render_arr_waterfall_facts', fn: render_arr_waterfall_facts }
+    ])
+  })
+}
+
+function ui_publish_the_good_stuff() {
+  return uiRunWrapped_('ui_publish_the_good_stuff', () => {
+    runSteps_([
+      { name: 'publish_the_good_stuff', fn: publish_the_good_stuff }
     ])
   })
 }

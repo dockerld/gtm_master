@@ -28,6 +28,7 @@ const PIPELINE_PART1_STEPS_ = [
   { name: 'render_org_subscription_info',          fn: () => render_org_subscription_info() },
   { name: 'render_middle_earth',                   fn: () => render_middle_earth() },
   { name: 'render_ring_view',                      fn: () => render_ring_view() },
+  { name: 'publish_the_good_stuff',                fn: () => publish_the_good_stuff() },
   { name: 'render_sauron_view',                    fn: () => render_sauron_view() },
   { name: 'render_all_stats_view',                 fn: () => render_all_stats_view() }
 ]
