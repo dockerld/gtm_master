@@ -45,7 +45,8 @@ promo AS (SELECT pr.org_id AS org_id, argMax(pc.code, pr.redeemed_at) AS promo_c
           FROM postgres.promo_redemptions pr JOIN postgres.promo_codes pc ON pc.id=pr.promo_code_id GROUP BY pr.org_id),
 u AS (SELECT id, email, name FROM postgres.users LIMIT 1 BY id),
 cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
-hc AS (SELECT workos_org_id, max(health_score) AS health_score FROM hubspot.companies GROUP BY workos_org_id)
+hc AS (SELECT workos_org_id, max(health_score) AS health_score FROM hubspot.companies GROUP BY workos_org_id),
+stripe_promo AS (SELECT id AS sid, JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','name') AS coupon_name FROM stripe.subscription LIMIT 1 BY id)
 SELECT
   o.id                                            AS org_id,        -- internal DB id
   coalesce(nullIf(o.workos_id,''), o.external_id) AS app_org_id,    -- WorkOS external id (fallback external_id)
@@ -57,7 +58,7 @@ SELECT
   u.name                                          AS owner_name,
   if(coalesce(sp.is_paying,0)=1,'yes','no')       AS is_paying,
   coalesce(picked.seats,0)                        AS seats,
-  coalesce(promo.promo_code,'')                   AS promo_code,
+  coalesce(nullIf(sp.coupon_name,''), promo.promo_code, '') AS promo_code,
   cust.email                                      AS billing_email,
   picked.stripe_customer_id                       AS billing_customer_id,
   sub_agg.stripe_subscription_ids                 AS stripe_subscription_ids,
@@ -72,6 +73,7 @@ LEFT JOIN picked       ON picked.org_id = o.id
 LEFT JOIN sub_agg      ON sub_agg.org_id = o.id
 LEFT JOIN seats_paying sp ON sp.org_id = o.id
 LEFT JOIN promo        ON promo.org_id = o.id
+LEFT JOIN stripe_promo sp ON sp.sid = picked.stripe_subscription_id
 LEFT JOIN u            ON u.id = picked.owner_user_id
 LEFT JOIN cust         ON cust.id = picked.stripe_customer_id
 LEFT JOIN hc           ON hc.workos_org_id = o.workos_id

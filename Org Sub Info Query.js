@@ -39,7 +39,8 @@ sx AS (   -- stripe sub detail (amounts handle multi-item via items[])
     coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval')) AS intv,
     coalesce(toInt(nullIf(toString(plan.interval_count),'')), JSONExtractInt(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval_count')) AS intv_count,
     arraySum(arrayMap(x -> JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS quantity_total,
-    arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount') * JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS amount_cents
+    arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount') * JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS amount_cents,
+    JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','name') AS coupon_name
   FROM stripe.subscription LIMIT 1 BY id
 ),
 fp AS (SELECT subscription_id, min(created_at) AS first_payment_at FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
@@ -80,7 +81,7 @@ SELECT
   coalesce(promo.promo_code,'')                        AS last_promo_used,
   ''                                                   AS redemption_location,
   promo.redeemed_at                                    AS redeemed_at,
-  coalesce(promo.promo_code,'')                        AS promo_code,
+  coalesce(nullIf(sx.coupon_name,''), promo.promo_code, '') AS promo_code,
   coalesce(promo.promo_name,'')                        AS promo_name,
   promo.promo_trial_days                               AS trial_days,
   coalesce(sx.cape, os.cancel_at_period_end)           AS cancel_at_period_end,
