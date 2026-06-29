@@ -24,7 +24,7 @@ const MIDDLE_EARTH_CFG = {
 const MIDDLE_EARTH_HOGQL = `
 WITH
 picked AS (  -- one sub per org: active → real trial → latest
-  SELECT org_id, stripe_customer_id, owner_user_id,
+  SELECT org_id, stripe_subscription_id, stripe_customer_id, owner_user_id,
          coalesce(full_seat_count,0)+coalesce(lite_seat_count,0) AS seats, trial_ends_at
   FROM postgres.org_subscriptions
   ORDER BY (status='active') DESC, (status='trialing' AND trial_ends_at > now()) DESC, created_at DESC
@@ -58,7 +58,7 @@ SELECT
   u.name                                          AS owner_name,
   if(coalesce(sp.is_paying,0)=1,'yes','no')       AS is_paying,
   coalesce(picked.seats,0)                        AS seats,
-  coalesce(nullIf(sp.coupon_name,''), promo.promo_code, '') AS promo_code,
+  coalesce(nullIf(spr.coupon_name,''), promo.promo_code, '') AS promo_code,
   cust.email                                      AS billing_email,
   picked.stripe_customer_id                       AS billing_customer_id,
   sub_agg.stripe_subscription_ids                 AS stripe_subscription_ids,
@@ -73,7 +73,7 @@ LEFT JOIN picked       ON picked.org_id = o.id
 LEFT JOIN sub_agg      ON sub_agg.org_id = o.id
 LEFT JOIN seats_paying sp ON sp.org_id = o.id
 LEFT JOIN promo        ON promo.org_id = o.id
-LEFT JOIN stripe_promo sp ON sp.sid = picked.stripe_subscription_id
+LEFT JOIN stripe_promo spr ON spr.sid = picked.stripe_subscription_id
 LEFT JOIN u            ON u.id = picked.owner_user_id
 LEFT JOIN cust         ON cust.id = picked.stripe_customer_id
 LEFT JOIN hc           ON hc.workos_org_id = o.workos_id
