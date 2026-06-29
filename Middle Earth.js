@@ -46,7 +46,16 @@ promo AS (SELECT pr.org_id AS org_id, argMax(pc.code, pr.redeemed_at) AS promo_c
 u AS (SELECT id, email, name FROM postgres.users LIMIT 1 BY id),
 cust AS (SELECT id, email FROM stripe.customer LIMIT 1 BY id),
 hc AS (SELECT workos_org_id, max(health_score) AS health_score FROM hubspot.companies GROUP BY workos_org_id),
-stripe_promo AS (SELECT id AS sid, JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','name') AS coupon_name FROM stripe.subscription LIMIT 1 BY id)
+stripe_promo AS (SELECT id AS sid,
+  JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','name')       AS coupon_name,
+  JSONExtractFloat (arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','percent_off') AS percent_off,
+  JSONExtractFloat (arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','amount_off')  AS amount_off,
+  JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'promotion_code')       AS promotion_code_id
+  FROM stripe.subscription LIMIT 1 BY id),
+promo_names AS (
+  SELECT 'promo_1S6YXl8UpQbjZAlZ5St46VX1' AS promotion_code_id, 'TIMALYN-BOWENS' AS promo_code_label
+  -- UNION ALL SELECT 'promo_xxxxx', 'OTHER-CODE'
+)
 SELECT
   o.id                                            AS org_id,        -- internal DB id
   coalesce(nullIf(o.workos_id,''), o.external_id) AS app_org_id,    -- WorkOS external id (fallback external_id)
@@ -58,7 +67,13 @@ SELECT
   u.name                                          AS owner_name,
   if(coalesce(sp.is_paying,0)=1,'yes','no')       AS is_paying,
   coalesce(picked.seats,0)                        AS seats,
-  coalesce(nullIf(spr.coupon_name,''), promo.promo_code, '') AS promo_code,
+  coalesce(
+    nullIf(pn.promo_code_label, ''),
+    if(spr.coupon_name != '', concat(spr.coupon_name,
+      multiIf(spr.percent_off>0, concat(' (', toString(toInt(round(spr.percent_off))), '% off)'),
+              spr.amount_off>0,  concat(' ($', toString(toInt(round(spr.amount_off/100))), ' off)'), '')), NULL),
+    nullIf(promo.promo_code, '')
+  )                                               AS promo_code,
   cust.email                                      AS billing_email,
   picked.stripe_customer_id                       AS billing_customer_id,
   sub_agg.stripe_subscription_ids                 AS stripe_subscription_ids,
@@ -74,6 +89,7 @@ LEFT JOIN sub_agg      ON sub_agg.org_id = o.id
 LEFT JOIN seats_paying sp ON sp.org_id = o.id
 LEFT JOIN promo        ON promo.org_id = o.id
 LEFT JOIN stripe_promo spr ON spr.sid = picked.stripe_subscription_id
+LEFT JOIN promo_names pn ON pn.promotion_code_id = spr.promotion_code_id
 LEFT JOIN u            ON u.id = picked.owner_user_id
 LEFT JOIN cust         ON cust.id = picked.stripe_customer_id
 LEFT JOIN hc           ON hc.workos_org_id = o.workos_id

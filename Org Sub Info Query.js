@@ -40,8 +40,15 @@ sx AS (   -- stripe sub detail (amounts handle multi-item via items[])
     coalesce(toInt(nullIf(toString(plan.interval_count),'')), JSONExtractInt(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval_count')) AS intv_count,
     arraySum(arrayMap(x -> JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS quantity_total,
     arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount') * JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(items,''),'data'))) AS amount_cents,
-    JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','name') AS coupon_name
+    JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','name') AS coupon_name,
+    JSONExtractFloat (arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','percent_off') AS percent_off,
+    JSONExtractFloat (arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'coupon','amount_off')  AS amount_off,
+    JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(discounts,'[]')),1),'promotion_code')       AS promotion_code_id
   FROM stripe.subscription LIMIT 1 BY id
+),
+promo_names AS (
+  SELECT 'promo_1S6YXl8UpQbjZAlZ5St46VX1' AS promotion_code_id, 'TIMALYN-BOWENS' AS promo_code_label
+  -- UNION ALL SELECT 'promo_xxxxx', 'OTHER-CODE'
 ),
 fp AS (SELECT subscription_id, min(created_at) AS first_payment_at FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
 pm AS (SELECT customer_id, min(created_at) AS pm_created FROM stripe.customerpaymentmethod GROUP BY customer_id),
@@ -81,13 +88,20 @@ SELECT
   coalesce(promo.promo_code,'')                        AS last_promo_used,
   ''                                                   AS redemption_location,
   promo.redeemed_at                                    AS redeemed_at,
-  coalesce(nullIf(sx.coupon_name,''), promo.promo_code, '') AS promo_code,
+  coalesce(
+    nullIf(pn.promo_code_label, ''),
+    if(sx.coupon_name != '', concat(sx.coupon_name,
+      multiIf(sx.percent_off>0, concat(' (', toString(toInt(round(sx.percent_off))), '% off)'),
+              sx.amount_off>0,  concat(' ($', toString(toInt(round(sx.amount_off/100))), ' off)'), '')), NULL),
+    nullIf(promo.promo_code, '')
+  )                                                    AS promo_code,
   coalesce(promo.promo_name,'')                        AS promo_name,
   promo.promo_trial_days                               AS trial_days,
   coalesce(sx.cape, os.cancel_at_period_end)           AS cancel_at_period_end,
   sx.churn_reason                                      AS churn_reason
 FROM os
 LEFT JOIN sx    ON sx.sub_id = os.stripe_subscription_id
+LEFT JOIN promo_names pn ON pn.promotion_code_id = sx.promotion_code_id
 LEFT JOIN orgs  ON orgs.id = os.org_id
 LEFT JOIN fp    ON fp.subscription_id = os.stripe_subscription_id
 LEFT JOIN cust  ON cust.id = os.stripe_customer_id
