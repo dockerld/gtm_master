@@ -39,7 +39,7 @@ pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
 per_org AS (SELECT o.id AS org_id, coalesce(picked.full_seat_count,0) AS full_seats, coalesce(picked.lite_seat_count,0) AS lite_seats, (pm.customer_id IS NOT NULL) AS has_pm, (fp_org.org_id IS NOT NULL) AS has_fp, (picked.app_status IN ('active','trialing')) AS is_live, coalesce(org_arr.arr_actual,0) AS arr_actual, round(coalesce(sx.period_amt,0) * if(sx.intv='month',12,1),2) AS arr_potential FROM (SELECT id FROM postgres.orgs LIMIT 1 BY id) o LEFT JOIN picked ON picked.org_id=o.id LEFT JOIN sx ON sx.sub_id=picked.stripe_subscription_id LEFT JOIN fp_org ON fp_org.org_id=o.id LEFT JOIN org_arr ON org_arr.org_id=o.id LEFT JOIN pm ON pm.customer_id=picked.stripe_customer_id),
 staged AS (SELECT *, multiIf(has_fp AND arr_actual>=0.01,'Paid', is_live AND has_pm,'Intent to Pay', is_live,'Trialing','') AS stage, if(has_fp AND arr_actual>=0.01, arr_actual, arr_potential) AS arr_row FROM per_org)
 SELECT stage, count() AS firms, round(sum(arr_row),2) AS arr, round(sum(arr_row)/12,2) AS mrr,
-       sum(full_seats+lite_seats) AS seats, sum(full_seats) AS full_seats, sum(lite_seats) AS lite_seats,
+       sum(full_seats+lite_seats) AS seats, sum(full_seats) AS full_seats_total, sum(lite_seats) AS lite_seats_total,
        round(sum(full_seats+lite_seats)/count(),2) AS avg_seats_per_firm
 FROM staged WHERE stage!='' GROUP BY stage ORDER BY arr DESC
 `
