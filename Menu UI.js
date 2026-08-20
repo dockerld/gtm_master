@@ -46,6 +46,9 @@ function onOpen() {
     .addItem('Render All the Stats', 'ui_render_all_stats')
     .addItem('Render Middle Earth', 'ui_render_middle_earth')
     .addSeparator()
+    .addItem('Send Ring email (test to me)', 'ui_send_ring_email_test')
+    .addItem('Send Ring email (everyone)', 'ui_send_ring_email_all')
+    .addSeparator()
     .addItem('Clean up query-test sheets', 'ui_cleanup_query_test_sheets')
     .addToUi()
 }
@@ -150,6 +153,18 @@ function ui_render_middle_earth() {
     runSteps_([
       { name: 'render_middle_earth', fn: render_middle_earth }
     ])
+  })
+}
+
+function ui_send_ring_email_test() {
+  return uiRunWrapped_('ui_send_ring_email_test', () => {
+    test_ring_weekly_email_to_me()
+  })
+}
+
+function ui_send_ring_email_all() {
+  return uiRunWrapped_('ui_send_ring_email_all', () => {
+    send_ring_weekly_email()
   })
 }
 

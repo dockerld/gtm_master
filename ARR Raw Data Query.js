@@ -19,14 +19,20 @@
 
 const ARR_RAW_DATA_QUERY_HOGQL = `
 WITH
-inv_full AS (SELECT id, subscription_id, created_at FROM stripe.invoice WHERE coalesce(billing_reason,'') IN ('subscription_cycle','subscription_create') AND status='paid' LIMIT 1 BY id),
-latest_inv AS (SELECT subscription_id, argMax(id, created_at) AS inv_id FROM inv_full GROUP BY subscription_id),
-rev AS (SELECT id, invoice_id, toFloat(amount) AS amt, toStartOfMonth(timestamp) AS mth FROM stripe.revenue_item_revenue_view WHERE is_recurring=1 LIMIT 1 BY id),
-sub_rev AS (SELECT li.subscription_id AS sid, round(SUM(rev.amt)/nullIf(uniq(rev.mth),0)*12,2) AS arr FROM latest_inv li JOIN rev ON rev.invoice_id=li.inv_id GROUP BY li.subscription_id),
+excl_emails AS (SELECT DISTINCT lower(customer_email) AS email FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) IN ('internal','duplicate','fake') AND coalesce(customer_email,'')!=''),
+founder_x AS (SELECT uo.org_id AS org_id, argMin(lower(u.email), uo.created_at) AS email FROM postgres.users_orgs uo JOIN postgres.users u ON u.id=uo.user_id GROUP BY uo.org_id),
+excluded_orgs AS (SELECT DISTINCT os.org_id AS org_id FROM postgres.org_subscriptions os JOIN (SELECT id, lower(email) AS email FROM stripe.customer LIMIT 1 BY id) c ON c.id=os.stripe_customer_id WHERE c.email IN (SELECT email FROM excl_emails) UNION DISTINCT SELECT org_id FROM founder_x WHERE email IN (SELECT email FROM excl_emails)),
+-- ARR basis = CURRENT subscription items (contracted run-rate), annualized, net of active
+-- discount. Replaces the old trailing "latest full-cycle invoice" method, which lagged
+-- mid-cycle upgrades/downgrades (e.g. an annual seat add wouldn't show until next renewal).
+-- Discount netting: percent_off/amount_off from live coupons; 'once' coupons ignored
+-- (one-time, not recurring); expired coupons are already gone from subscription.discounts.
+sxi AS (SELECT id AS sid, coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(toString(items),''),'data'),1),'plan','interval')) AS intv, arraySum(arrayMap(x -> JSONExtractInt(x,'plan','amount')*JSONExtractInt(x,'quantity'), JSONExtractArrayRaw(coalesce(toString(items),''),'data')))/100.0 AS period_amt, arraySum(arrayMap(d -> if(JSONExtractString(d,'coupon','duration')!='once', toFloatOrZero(JSONExtractRaw(d,'coupon','percent_off')), 0.0), JSONExtractArrayRaw(coalesce(toString(discounts),'[]')))) AS pct_off, arraySum(arrayMap(d -> if(JSONExtractString(d,'coupon','duration')!='once', toFloatOrZero(JSONExtractRaw(d,'coupon','amount_off')), 0.0), JSONExtractArrayRaw(coalesce(toString(discounts),'[]'))))/100.0 AS amt_off_period FROM stripe.subscription LIMIT 1 BY id),
+ci AS (SELECT sid, round(greatest(0, (period_amt*if(intv='month',12,1))*(1-least(pct_off,100.0)/100.0) - amt_off_period*if(intv='month',12,1)),2) AS arr FROM sxi),
 paid AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
 sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
 fp_org AS (SELECT org_id, min(i.created_at) AS first_payment_at FROM postgres.org_subscriptions os JOIN stripe.invoice i ON i.subscription_id=os.stripe_subscription_id WHERE i.status='paid' AND toFloat(i.total)>0 GROUP BY org_id),
-org_arr AS (SELECT osb.org_id, round(sum(sr.arr),2) AS total_arr_paid FROM postgres.org_subscriptions osb JOIN sub_rev sr ON sr.sid=osb.stripe_subscription_id WHERE osb.stripe_subscription_id IN (SELECT subscription_id FROM paid) AND osb.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl) AND osb.status!='canceled' AND sr.arr>0 GROUP BY osb.org_id),
+org_arr AS (SELECT osb.org_id, round(sum(ci.arr),2) AS total_arr_paid FROM postgres.org_subscriptions osb JOIN ci ON ci.sid=osb.stripe_subscription_id WHERE osb.stripe_subscription_id IN (SELECT subscription_id FROM paid) AND osb.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl) AND osb.status!='canceled' AND ci.arr>0 GROUP BY osb.org_id),
 picked AS (SELECT org_id, stripe_subscription_id, stripe_customer_id, status AS app_status, created_at AS sub_created, trial_ends_at, cancel_at_period_end, current_period_end FROM postgres.org_subscriptions ORDER BY (stripe_subscription_id IN (SELECT subscription_id FROM paid) AND status!='canceled') DESC, (status='active') DESC, (status='trialing' AND trial_ends_at>now()) DESC, created_at DESC LIMIT 1 BY org_id),
 sx AS (SELECT id AS sub_id, start_date AS sub_start, coalesce(nullIf(plan.interval,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','interval')) AS intv, coalesce(nullIf(plan.product,''), JSONExtractString(arrayElement(JSONExtractArrayRaw(coalesce(items,''),'data'),1),'plan','product')) AS product_id FROM stripe.subscription LIMIT 1 BY id),
 pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
@@ -74,6 +80,7 @@ SELECT
   formatDateTime(final.subscription_start_date, '%Y-%m-%d %H:%i:%S') AS subscription_start_date
 FROM final
 WHERE final.ring_bucket != ''
+  AND final.org_id NOT IN (SELECT org_id FROM excluded_orgs)
 ORDER BY total_arr DESC
 LIMIT 5000
 `

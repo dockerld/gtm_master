@@ -97,7 +97,14 @@ function buildExistingSnapshotKeySetGeneric_(sheet, snapshotDate, snapDateHeader
   const norm = typeof normalizeFn === 'function' ? normalizeFn : (v => String(v || '').trim())
 
   for (const r of data) {
-    const d = String(r[snapIdx] || '').trim()
+    // snapshot_date is stored as a date-serial (the column is date-formatted),
+    // so String(cell) yields "46082", never "2026-07-01" — normalize both sides
+    // through the same date->YYYY-MM-DD key so dedup actually matches. Without
+    // this the existing-key set comes back empty and the daily pipeline
+    // re-appends the whole arr_raw_data every run (the Jun/Jul 21x bloat).
+    const d = (typeof ARR_snap_normSnapshotKey_ === 'function')
+      ? ARR_snap_normSnapshotKey_(r[snapIdx])
+      : String(r[snapIdx] || '').trim()
     if (d !== snapshotDate) continue
 
     const key = norm(r[keyIdx])

@@ -363,8 +363,12 @@ function render_arr_waterfall_facts(cfgOverride) {
     outSheet.getRange(1, 1, 1, outHeaders.length).setValues([outHeaders])
 
     if (out.length) {
-      // Force month column to plain text BEFORE writing so Sheets doesn't auto-convert YYYY-MM to dates
-      outSheet.getRange(2, 1, out.length, 1).setNumberFormat('@')
+      // Force every column EXCEPT the trailing numeric `amount` to plain text BEFORE
+      // writing, so Sheets can't auto-convert date-like strings (ISO timestamps, YYYY-MM,
+      // YYYY-MM-DD) into date serials. A column that ends up a mix of serials + text
+      // breaks the PostHog warehouse import ("numeric column contains a non-numeric
+      // value"). `amount` (last column) is the only numeric one and stays default.
+      outSheet.getRange(2, 1, out.length, outHeaders.length - 1).setNumberFormat('@')
       batchSetValuesCompat_(outSheet, 2, 1, out, CFG.WRITE_CHUNK)
     }
 
