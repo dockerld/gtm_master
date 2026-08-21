@@ -42,7 +42,7 @@ pm AS (SELECT DISTINCT customer_id FROM stripe.customerpaymentmethod),
 prod AS (SELECT id, name FROM stripe.product LIMIT 1 BY id),
 orgs AS (SELECT id, name, created_at FROM postgres.orgs LIMIT 1 BY id),
 -- MANAGED orgs: keyed on the sheet's org_id. ARR = 'amount' (injected directly, no Stripe sub/invoice needed).
-managed AS (SELECT ok.org_id AS org_id, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.amount),''),'[^0-9.]',''))) AS amt, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.full_seats),''),'[^0-9.]',''))) AS full_seats, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.lite_seats),''),'[^0-9.]',''))) AS lite_seats FROM override_googlesheets_manual_stripe_changes ovr JOIN org_keys ok ON ok.k = toString(ovr.org_id) WHERE lower(ovr.exclude_reason)='managed' AND coalesce(toString(ovr.org_id),'') != '' GROUP BY ok.org_id),
+managed AS (SELECT ok.org_id AS org_id, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.amount),''),'[^0-9.]',''))) AS amt, max(toIntOrZero(replaceRegexpAll(coalesce(toString(ovr.full_seats),''),'[^0-9]',''))) AS full_seats, max(toIntOrZero(replaceRegexpAll(coalesce(toString(ovr.lite_seats),''),'[^0-9]',''))) AS lite_seats FROM override_googlesheets_manual_stripe_changes ovr JOIN org_keys ok ON ok.k = toString(ovr.org_id) WHERE lower(ovr.exclude_reason)='managed' AND coalesce(toString(ovr.org_id),'') != '' GROUP BY ok.org_id),
 assembled AS (
   SELECT o.id AS org_id, o.name AS org_name, o.created_at AS org_creation_date,
     fp_org.first_payment_at AS first_payment_date,
