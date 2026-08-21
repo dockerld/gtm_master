@@ -103,10 +103,10 @@ function ui_run_only_stripe() {
 
 function ui_run_only_ring() {
   return uiRunWrapped_('ui_run_only_ring', () => {
+    // The query-based Ring is self-contained from PostHog (postgres + stripe),
+    // so it needs no raw Stripe pull or org_subscription_info prerequisite.
     runSteps_([
-      { name: 'stripe_pull_subscriptions_to_raw', fn: stripe_pull_subscriptions_to_raw },
-      { name: 'render_org_subscription_info',     fn: render_org_subscription_info },
-      { name: 'render_ring_view',                 fn: render_ring_view }
+      { name: 'render_ring_view', fn: render_ring_view }
     ])
   })
 }
