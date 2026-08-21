@@ -34,17 +34,12 @@ subs AS (SELECT org_id, argMax(status, created_at) AS sub_status,
          FROM postgres.org_subscriptions GROUP BY org_id),
 -- Paying = The Ring's exact gate (real paid invoice, live, not sheet-excluded)
 paid_subs AS (SELECT subscription_id FROM stripe.invoice WHERE status='paid' AND toFloat(total)>0 AND subscription_id IS NOT NULL GROUP BY subscription_id),
--- Map an override-sheet org_id to the internal org id (internal DB id OR app/WorkOS id).
-org_keys AS (SELECT id AS org_id, toString(id) AS k FROM postgres.orgs LIMIT 1 BY id UNION ALL SELECT id AS org_id, coalesce(nullIf(workos_id,''), external_id) AS k FROM postgres.orgs LIMIT 1 BY id),
--- MANAGED orgs: keyed on sheet org_id. Marks them paying; seats = full_seats+lite_seats.
-managed AS (SELECT ok.org_id AS org_id, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.amount),''),'[^0-9.]',''))) AS amt, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.full_seats),''),'[^0-9.]',''))) AS full_seats, max(toFloat64OrNull(replaceRegexpAll(coalesce(toString(ovr.lite_seats),''),'[^0-9.]',''))) AS lite_seats FROM override_googlesheets_manual_stripe_changes ovr JOIN org_keys ok ON ok.k = toString(ovr.org_id) WHERE lower(ovr.exclude_reason)='managed' AND coalesce(toString(ovr.org_id),'') != '' GROUP BY ok.org_id),
--- Non-managed exclusions (not counted as paying), keyed on the sheet's customer_email.
-sheet_excl AS (SELECT DISTINCT os.org_id FROM postgres.org_subscriptions os JOIN (SELECT id, lower(email) AS email FROM stripe.customer LIMIT 1 BY id) c ON c.id = os.stripe_customer_id WHERE c.email IN (SELECT lower(customer_email) FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed' AND coalesce(customer_email,'') != '')),
+sheet_excl AS (SELECT subscription_id FROM override_googlesheets_manual_stripe_changes WHERE lower(exclude_reason) != 'managed'),
 ss AS (SELECT id, canceled_at, status FROM stripe.subscription LIMIT 1 BY id),
 osub AS (SELECT org_id, stripe_subscription_id FROM postgres.org_subscriptions),
 paying_orgs AS (SELECT DISTINCT osub.org_id AS org_id FROM osub JOIN ss ON ss.id=osub.stripe_subscription_id
   WHERE osub.stripe_subscription_id IN (SELECT subscription_id FROM paid_subs)
-    AND osub.org_id NOT IN (SELECT org_id FROM sheet_excl)
+    AND osub.stripe_subscription_id NOT IN (SELECT subscription_id FROM sheet_excl)
     AND NOT (ss.status='canceled' OR (ss.canceled_at IS NOT NULL AND ss.canceled_at < now()))),
 promo AS (SELECT pr.org_id AS org_id, argMax(pc.code, pr.redeemed_at) AS promo_code
   FROM postgres.promo_redemptions pr JOIN postgres.promo_codes pc ON pc.id=pr.promo_code_id GROUP BY pr.org_id),
@@ -82,9 +77,9 @@ SELECT
   coalesce(ai.action_items_synced,0) AS action_items_synced,
   coalesce(ev.logins,0) AS logged_in_count,
   coalesce(ev.active_days,0) AS active_days,
-  if(mg.org_id IS NOT NULL AND (coalesce(mg.full_seats,0)+coalesce(mg.lite_seats,0))>0, coalesce(mg.full_seats,0)+coalesce(mg.lite_seats,0), coalesce(s.seats,0)) AS seats,
+  coalesce(s.seats,0) AS seats,
   coalesce(cl.clients_count,0) AS clients,
-  if(po.org_id IS NOT NULL OR mg.org_id IS NOT NULL,'yes','no') AS paying,
+  if(po.org_id IS NOT NULL,'yes','no') AS paying,
   formatDateTime(b.user_created,'%Y-%m-%d') AS sign_up_date,
   coalesce(ask.ask_meeting,0) AS ask_meeting,
   coalesce(ask.ask_global,0) AS ask_global,
@@ -105,7 +100,6 @@ LEFT JOIN orgs o ON o.org_id=pog.org_id
 LEFT JOIN org_members om ON om.org_id=pog.org_id
 LEFT JOIN subs s ON s.org_id=pog.org_id
 LEFT JOIN paying_orgs po ON po.org_id=pog.org_id
-LEFT JOIN managed mg ON mg.org_id=pog.org_id
 LEFT JOIN promo pr ON pr.org_id=pog.org_id
 LEFT JOIN clients cl ON cl.org_id=pog.org_id
 LEFT JOIN mb ON mb.user_id=b.user_id
